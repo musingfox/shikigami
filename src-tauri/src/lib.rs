@@ -30,6 +30,29 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            // ponytail: macOS only — Linux hotkey = Hyprland bind (M4), Wayland can't self-register
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_global_shortcut::{
+                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+                };
+
+                let toggle_shortcut =
+                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyS);
+                app.handle().plugin(
+                    tauri_plugin_global_shortcut::Builder::new()
+                        .with_handler(move |app, shortcut, event| {
+                            if shortcut == &toggle_shortcut
+                                && event.state() == ShortcutState::Pressed
+                            {
+                                toggle_main_window(app);
+                            }
+                        })
+                        .build(),
+                )?;
+                app.global_shortcut().register(toggle_shortcut)?;
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
