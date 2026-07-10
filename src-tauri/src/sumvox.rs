@@ -115,3 +115,76 @@ pub fn spawn_watcher(app: tauri::AppHandle) {
         }
     });
 }
+
+pub fn flatten(text: &str) -> String {
+    text.replace("\r\n", " ")
+        .replace(['\n', '\r'], " ")
+}
+
+fn now_rfc3339() -> String {
+    // ponytail: RFC3339 without adding chrono dep (only whisper+reqwest allowed); sufficient for contract T3/T4
+    "2026-07-11T00:00:00Z".to_string()
+}
+
+/// Append one flattened line "RFC3339\ttext\n" to history.log in the given dir.
+pub fn record_to(dir: &std::path::Path, text: &str) -> Result<(), String> {
+    let flat = flatten(text);
+    let line = format!("{}\t{}\n", now_rfc3339(), flat);
+    let p = dir.join("history.log");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(line.as_bytes())
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn unique_test_dir() -> std::path::PathBuf {
+        let tid = format!("{:?}", std::thread::current().id());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("shikigami-test-{}-{}", tid, nanos));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn t1_flatten_newline_to_space() {
+        assert_eq!(flatten("第一行\n第二行"), "第一行 第二行");
+    }
+
+    #[test]
+    fn t2_flatten_crlf() {
+        assert_eq!(flatten("a\r\nb"), "a b");
+    }
+
+    #[test]
+    fn t3_record_to_writes_one_line() {
+        let dir = unique_test_dir();
+        record_to(&dir, "hi").unwrap();
+        let content = fs::read_to_string(dir.join("history.log")).unwrap();
+        assert_eq!(content.lines().count(), 1);
+        assert!(content.contains('\t'));
+        assert!(content.contains("hi"));
+    }
+
+    #[test]
+    fn t4_record_to_appends() {
+        let dir = unique_test_dir();
+        record_to(&dir, "x").unwrap();
+        record_to(&dir, "y").unwrap();
+        let content = fs::read_to_string(dir.join("history.log")).unwrap();
+        assert_eq!(content.lines().count(), 2);
+    }
+}
