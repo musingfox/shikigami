@@ -145,7 +145,10 @@ async function stopCaptureAndSend() {
   try {
     await invoke("process_utterance", { pcm: Array.from(bytes) });
   } catch (e) {
-    console.warn("process_utterance invoke failed", e);
+    const msg = String(e);
+    toast("⚠ STT " + msg);
+    setSpeaking(false);
+    setLevel(0);
   }
 }
 
