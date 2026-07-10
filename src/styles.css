@@ -23,13 +23,14 @@ body {
   transition: opacity 0.4s ease;
 }
 
-/* bubble sits between the avatar and the screen center: default below
-   the blob, .above flips it, .lean-left hugs the center-facing side */
+/* bubble sits diagonally between the avatar and the screen center:
+   .above flips it over the blob, .lean-left mirrors it horizontally,
+   so its quadrant always faces the center */
 #toast {
   position: absolute;
-  top: calc(50% + 66px);
-  right: 12px;
-  max-width: 200px;
+  top: calc(50% + 64px);
+  left: calc(50% - 20px);
+  max-width: 170px;
   max-height: 76px;
   overflow: hidden;
   padding: 6px 10px;
@@ -43,12 +44,12 @@ body {
 
 #toast.above {
   top: auto;
-  bottom: calc(50% + 66px);
+  bottom: calc(50% + 64px);
 }
 
 #toast.lean-left {
-  right: auto;
-  left: 12px;
+  left: auto;
+  right: calc(50% - 20px);
 }
 
 #toast.show {
