@@ -15,24 +15,28 @@ fn read_file(path: String) -> Result<tauri::ipc::Response, String> {
         .map_err(|e| e.to_string())
 }
 
+// Full voice loop: pcm f32le@16k → whisper STT → transcript event → brain → speak-back.
+// Errors carry a stage label ("stt:"/"brain:"/"speak:") for the frontend toast.
+// ponytail: pcm crosses IPC as a JSON byte array; switch to InvokeBody::Raw if latency matters
 #[tauri::command]
-async fn brain_reply(transcript: String) -> Result<String, String> {
-    voice::reply_to_transcript(&transcript).await
-}
-
-#[tauri::command]
-fn process_utterance(pcm: Vec<u8>) -> Result<(), String> {
-    // bytes are f32le mono 16k from frontend; consumed by stt later
-    if pcm.is_empty() {
-        return Err("empty pcm".into());
-    }
+async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), String> {
+    let transcript = tauri::async_runtime::spawn_blocking(move || voice::transcribe_bytes(pcm))
+        .await
+        .map_err(|e| format!("stt: {e}"))?
+        .map_err(|e| format!("stt: {e}"))?;
+    let _ = app.emit(events::VOICE_TRANSCRIPT, transcript.clone());
+    let reply = voice::reply_to_transcript(&transcript)
+        .await
+        .map_err(|e| format!("brain: {e}"))?;
+    sumvox::record_to(&sumvox::config_dir(), &reply).map_err(|e| format!("speak: {e}"))?;
+    sumvox::spawn_say(&reply).map_err(|e| format!("speak: {e}"))?;
     Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file, brain_reply, process_utterance])
+        .invoke_handler(tauri::generate_handler![read_file, process_utterance])
         .setup(|app| {
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());
@@ -41,20 +45,34 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 use tauri::Manager;
-                use tauri_plugin_global_shortcut::{
-                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-                };
+                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
                 let toggle_shortcut =
                     Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyS);
                 let ptt_shortcut =
                     Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyM);
+                static LISTENING: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, shortcut, event| {
-                            let st = event.state();
-                            if shortcut == &toggle_shortcut {
-                                if st == ShortcutState::Pressed {
+                            use std::sync::atomic::Ordering;
+                            use voice::VoiceShortcut;
+                            let action = voice::shortcut_action(
+                                shortcut == &ptt_shortcut,
+                                event.state(),
+                                LISTENING.load(Ordering::SeqCst),
+                            );
+                            match action {
+                                VoiceShortcut::StartListening => {
+                                    LISTENING.store(true, Ordering::SeqCst);
+                                    let _ = app.emit(VOICE_LISTENING, true);
+                                }
+                                VoiceShortcut::StopListening => {
+                                    LISTENING.store(false, Ordering::SeqCst);
+                                    let _ = app.emit(VOICE_LISTENING, false);
+                                }
+                                VoiceShortcut::ToggleWindow => {
                                     if let Some(w) = app.get_webview_window("main") {
                                         if w.is_visible().unwrap_or(false) {
                                             let _ = w.hide();
@@ -63,9 +81,7 @@ pub fn run() {
                                         }
                                     }
                                 }
-                            } else if shortcut == &ptt_shortcut {
-                                let is_pressed = st == ShortcutState::Pressed;
-                                let _ = app.emit(VOICE_LISTENING, is_pressed);
+                                VoiceShortcut::Ignore => {}
                             }
                         })
                         .build(),

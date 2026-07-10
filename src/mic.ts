@@ -79,6 +79,18 @@ export function rms(samples: Float32Array): number {
   return Math.sqrt(sum / samples.length);
 }
 
+// VoiceErrorSurface: every pipeline failure becomes a readable toast.
+// Rust rejections arrive stage-labeled ("stt:"/"brain:"/"speak:").
+export function errorText(msg: string): string {
+  return "⚠ " + msg;
+}
+
+function surfaceError(msg: string) {
+  toast(errorText(msg));
+  recordSpeak(false);
+  recordLevel(0);
+}
+
 // test-only hook for driving state without tauri listen (used by voice.test.ts T1)
 export function __setListeningForTest(on: boolean) {
   listening = on;
@@ -117,7 +129,7 @@ async function startCapture() {
     source.connect(processor);
     processor.connect(audioCtx.destination);
   } catch (err) {
-    console.warn("mic getUserMedia failed (manual perm may be needed in dev)", err);
+    surfaceError("mic: " + String(err));
   }
 }
 
@@ -145,10 +157,7 @@ async function stopCaptureAndSend() {
   try {
     await invoke("process_utterance", { pcm: Array.from(bytes) });
   } catch (e) {
-    const msg = String(e);
-    toast("⚠ STT " + msg);
-    setSpeaking(false);
-    setLevel(0);
+    surfaceError(String(e));
   }
 }
 
