@@ -1,3 +1,4 @@
+mod events;
 mod sumvox;
 mod tray;
 

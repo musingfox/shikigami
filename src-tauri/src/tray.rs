@@ -1,35 +1,24 @@
-// Tray menu with SumVox parity: mute toggle (muted flag file), recent
-// notifications (re-toast on click), open config dir. Rebuilt by the
-// watcher whenever muted/history change.
+// Tray menu (presentation): mute toggle, recent reports (click re-toasts),
+// open config dir. Talks to the notifier only through the sumvox adapter's
+// public fns and emits only core events. Rebuilt by the watcher whenever
+// muted/history change.
+//
+// ponytail: mute/recent/config-dir go straight to the sumvox adapter; put a
+// port trait in front when a second notifier actually lands.
 
-use std::fs;
 use tauri::{
     menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager,
 };
 
+use crate::events::AGENT_REPORT;
 use crate::sumvox;
 
 const TRAY_ID: &str = "main";
 const RECENT_N: usize = 5;
 
-fn recent_lines() -> Vec<String> {
-    fs::read_to_string(sumvox::dir().join("history.log"))
-        .map(|s| {
-            s.lines()
-                .rev()
-                .filter(|l| !l.trim().is_empty())
-                .take(RECENT_N)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-// "RFC3339\ttext" → truncated text for a menu label
-fn label(line: &str) -> String {
-    let text = line.split_once('\t').map(|(_, t)| t).unwrap_or(line);
+fn label(text: &str) -> String {
     let mut s: String = text.chars().take(40).collect();
     if s.len() < text.len() {
         s.push('…');
@@ -39,16 +28,15 @@ fn label(line: &str) -> String {
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let toggle = MenuItem::with_id(app, "toggle", "Show / Hide", true, None::<&str>)?;
-    let muted = sumvox::dir().join("muted").exists();
-    let mute = CheckMenuItem::with_id(app, "mute", "Mute", true, muted, None::<&str>)?;
+    let mute = CheckMenuItem::with_id(app, "mute", "Mute", true, sumvox::is_muted(), None::<&str>)?;
 
-    let lines = recent_lines();
+    let reports = sumvox::recent(RECENT_N);
     let mut hist_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
+    for (i, r) in reports.iter().enumerate() {
         hist_items.push(MenuItem::with_id(
             app,
             format!("hist-{i}"),
-            label(line),
+            label(&r.text),
             true,
             None::<&str>,
         )?);
@@ -83,25 +71,20 @@ fn on_menu_event(app: &AppHandle, id: &str) {
     match id {
         "toggle" => toggle_main_window(app),
         "mute" => {
-            let flag = sumvox::dir().join("muted");
-            let _ = if flag.exists() {
-                fs::remove_file(&flag)
-            } else {
-                fs::write(&flag, "")
-            };
+            sumvox::set_muted(!sumvox::is_muted());
             refresh(app); // watcher also refreshes, this just avoids the poll lag
         }
         "open-config" => {
             // ponytail: macOS `open`; xdg-open when Linux lands (M4)
             let _ = std::process::Command::new("open")
-                .arg(sumvox::dir())
+                .arg(sumvox::config_dir())
                 .spawn();
         }
         "quit" => app.exit(0),
         _ => {
             if let Some(i) = id.strip_prefix("hist-").and_then(|n| n.parse::<usize>().ok()) {
-                if let Some(line) = recent_lines().get(i) {
-                    let _ = app.emit("sumvox:history", line.clone());
+                if let Some(r) = sumvox::recent(RECENT_N).into_iter().nth(i) {
+                    let _ = app.emit(AGENT_REPORT, r);
                 }
             }
         }

@@ -1,12 +1,14 @@
+// Composition root: wires core events to the presentation modules.
+// Only core event names appear here — adapter-specific formats stay in Rust.
+
 import { listen } from "@tauri-apps/api/event";
 import { initAvatar } from "./avatar";
+import { AGENT_REPORT, AGENT_SPEECH, VOICE_MUTED, type Report } from "./events";
 import { lipsync } from "./lipsync";
 import { toast } from "./toast";
 
 initAvatar(document.getElementById("orb") as HTMLCanvasElement);
 
-// SumVox file-IPC events relayed by the Rust watcher.
-listen<string>("sumvox:now-playing", (e) => lipsync(e.payload));
-// history.log lines are "RFC3339\ttext"
-listen<string>("sumvox:history", (e) => toast(e.payload.split("\t").slice(1).join("\t") || e.payload));
-listen<boolean>("sumvox:muted", (e) => console.log("muted", e.payload));
+listen<string>(AGENT_SPEECH, (e) => lipsync(e.payload));
+listen<Report>(AGENT_REPORT, (e) => toast(e.payload.text));
+listen<boolean>(VOICE_MUTED, (e) => console.log("muted", e.payload));
