@@ -1,137 +1,102 @@
 # Shikigami — Project Context
 
-Handoff from the SumVox session where this was scoped (2026-07-09). Read this
-first when opening a fresh session here.
-
-## What it is
-
-A **desktop-floating voice companion**. One floating avatar + voice, that:
-1. **Observes** your running agents and reports progress ("CC finished the task")
-   — voice + an avatar reaction. Like SumVox's Stop hook, embodied & persistent.
-2. **Takes voice commands** (Siri-like): you speak → it does something → speaks back.
-
-It is **NOT an agent engine**. It does not run/host coding agents. Agents run
-where they always run (your terminals); shikigami is the face that watches them
-and, when asked, pokes them.
+Desktop-floating voice companion. One floating avatar that **observes** your
+coding agents (reports progress by voice + reaction) and — later — **takes
+voice commands**. It is NOT an agent engine: agents run in your terminals;
+shikigami watches them and, when asked, pokes them.
 
 Metaphor: you = onmyōji; each backend agent = a *shikigami* (式神) you already
 summoned; this app is how you hear from and speak to them.
 
-## Two channels (the whole architecture)
+## Two channels
 
 ```
-① OBSERVE (inbound)
-   agent event ─▶ shikigami ─▶ avatar reaction + spoken report
-   ("有訊息才有反應" lofi model; the "message" = an agent turn finishing)
-
-② COMMAND (outbound · the Siri part)
-   you speak ─▶ STT ─▶ brain (LLM + tools) ─▶ act ─▶ speak back
-   acting = send a prompt into an agent, or drive the Mac via shikigami-bridge
+① OBSERVE (inbound, DONE)   agent event → avatar reaction + spoken report
+② COMMAND (outbound, M2)    you speak → STT → brain → act (send-keys / bridge) → speak back
 ```
 
-## Agent I/O — how we watch & poke agents
+## Current state (2026-07-10)
 
-Two directions, per agent. **herdr covers BOTH for pane-based agents** and is
-the recommended integration; native hooks / ACP are precise per-agent alternates.
+M0 skeleton + M1 channel ① are **built and verified**:
+
+- Tauri 2, vanilla TS + Vite (bun), deps = tauri + global-shortcut plugin only
+- Transparent undecorated always-on-top window, whole-window drag,
+  all-workspaces; tray (Mute / Recent / Open Config / Quit); hotkey
+  Cmd+Ctrl+S toggles visibility (macOS)
+- Canvas blob avatar (48-pt Catmull-Rom, ported from SumVox
+  `prototype/orb-canvas.html`), idle 20fps dim / speaking 60fps bright
+- RMS lip-sync: `agent:speech` audio → WebAudio → 40ms envelope → mouth
+- Typewriter toast placed diagonally between avatar and screen center
+- Channel ① source: **SumVox file IPC** (`~/.config/sumvox/`), 500ms poll
+
+## Architecture
+
+See `ARCHITECTURE.md` — hexagonal, one core event contract
+(`agent:speech` / `agent:report` / `voice:muted`, defined in
+`src-tauri/src/events.rs` + mirrored in `src/events.ts`). Iron rules:
+
+1. Frontend subscribes to core events only; adapter formats never cross into TS.
+2. Everything SumVox-specific lives inside `src-tauri/src/sumvox.rs`.
+3. New agent source = one Rust module normalizing into core events + one
+   registration line in `lib.rs`. Nothing else changes.
+
+## Load-bearing constraints (do not relearn these)
+
+- **Never spawn Claude Code programmatically.** Since 2026-06-15, `claude -p`
+  / Agent SDK / ACP bill to a separate Agent SDK credit, not the subscription.
+  Only the interactive TUI bills to subscription → command channel ② must
+  inject into the user's live pane (tmux `send-keys` / herdr), never spawn.
+- **SumVox stays untouched.** shikigami is a second consumer of its files
+  (`now_playing` = audio path, `history.log` = "RFC3339\ttext" lines,
+  `muted` = flag file). SumVox's own CC Stop hook is what feeds channel ①.
+- **macOS transparency** needs `macOSPrivateApi: true` + tauri
+  `macos-private-api` feature (already set; blocks App Store, fine).
+- **Wayland/Hyprland (M4)**: apps can't self-position or self-register global
+  hotkeys (bind in Hyprland config); WebKitGTK transparency needs
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1`; also bake a VP9/webm if avatar ever
+  becomes video.
+
+## Agent I/O reference (for channel ② and future sources)
 
 | Agent | OBSERVE | COMMAND |
 |-------|---------|---------|
-| Claude Code | `Stop`/`Notification`/`TaskCompleted` hook (SumVox already does this) — cmd hook, JSON on stdin | inject into live TUI pane: **tmux `send-keys`** or **herdr `agent send`/`pane run`** |
-| Codex CLI | `notify` (`agent-turn-complete`) in `~/.codex/config.toml` | herdr / send-keys (or ACP if it speaks it) |
-| Hermes (NousResearch) | `on_session_end` hook in `cli-config.yaml` | herdr / send-keys |
-| ACP agents (gemini --acp, …) | their events / herdr | **`session/prompt`** JSON-RPC direct |
-| OpenClaw | ⚠️ only cron-webhook, no lifecycle stream | herdr / send-keys |
+| Claude Code | SumVox hook (current) or `Stop`/`Notification` hooks | tmux `send-keys` / herdr `agent send` |
+| Codex CLI | `notify` (`agent-turn-complete`) in `~/.codex/config.toml` | herdr / send-keys |
+| Hermes | `on_session_end` hook in `cli-config.yaml` | herdr / send-keys |
+| ACP agents | their events / herdr | `session/prompt` JSON-RPC |
 
-- **herdr** (`herdr.dev`, github.com/ogulcancelik/herdr): a Rust "tmux for AI
-  agents". Auto-detects CC/Codex per pane, tracks idle/working/blocked/done,
-  exposes a **local Unix-socket JSON API + CLI, bidirectional** (subscribe to
-  state events; `agent.send`/`pane.send_text`/`pane.send_keys` to inject). It
-  already IS the "monitor + poke many agents" layer — **consume it, don't
-  rebuild**. Cost: user must run agents inside herdr; young project, verify
-  socket-API stability. `agent send` auto-submit (trailing newline) unverified —
-  check `herdr agent send --help`.
-- **tmux `send-keys`**: rock-solid universal fallback — writes to the pane's
-  live pty *as if typed*, does NOT spawn a new process. This is why it's the
-  clean way to drive CC (see billing below).
-- zellij is weak for us: plugin events are in-process wasm only, no external
-  event subscription, no silence detection.
+herdr (`herdr.dev`) = tmux-for-agents with Unix-socket JSON API, covers both
+directions for pane-based agents — consume it at the multi-agent phase, don't
+rebuild. zellij is unsuitable (in-process wasm plugins only).
 
-## Claude Code billing — do NOT drive it programmatically
+## Dev workflow
 
-Confirmed & sourced (memory [[claude-code-agent-sdk-billing]]): since 2026-06-15,
-`claude -p` / Agent SDK / ACP (`claude-agent-acp`) all draw from a **separate
-Agent SDK credit**, NOT the subscription pool. Only the **interactive TUI**
-(no `-p`) bills to subscription.
+```sh
+bun run tauri dev        # run app (auto-rebuilds Rust + TS)
+scripts/demo.sh "text"   # fire a fake notification: toast + lip-sync + audio
+bun run build            # tsc + vite build (frontend check)
+cargo check / clippy     # in src-tauri/
+```
 
-→ Therefore shikigami **never spawns CC programmatically** (that includes
-TanStack AI's `claudeCodeText` harness — it uses the Agent SDK, so it would burn
-the separate credit). To send CC a command, we **inject into the user's live
-interactive pane** (send-keys / herdr) — that stays interactive = subscription.
+Manual regression: run demo.sh → avatar mouth moves with audio, bubble types
+out text toward screen center, tray Recent gains the entry, Mute toggle
+creates/removes `~/.config/sumvox/muted`.
 
-## SumVox's role
+## Roadmap
 
-SumVox (`../SumVox`) = Rust CLI, summarize + TTS **only** (no STT). It stays the
-standalone CC-hook notifier. shikigami reuses its hook/transcript model; whether
-the new app calls SumVox as a tool or does summarize+TTS itself is open (TanStack
-AI or SumVox both cover summarize+TTS).
+- **M2 — channel ②**: local STT (whisper.cpp / whisper-rs) → brain (lean
+  default: Rust direct Anthropic API chat loop; TanStack AI only if its
+  realtime voice earns its keep) → act via send-keys / shikigami-bridge (MCP)
+  → speak via SumVox. Not yet atomized — build task cards first (obw:pm,
+  vault "obsidian", `pm/shikigami/`).
+- **M3 — avatar polish**: possibly pre-baked AI video clips (grok
+  image→video, details in SumVox project memory) replacing the canvas blob.
+- **M4 — Linux/Hyprland**: window rules, Hyprland hotkey bind, xdg-open in
+  tray, Wayland caveats above.
 
-## TanStack AI — voice-brain candidate ONLY
+## Related repos / naming
 
-Its coding-agent sandbox/harness layer (`claudeCodeText`, `acpCompatible`, etc.)
-is **out of scope** — we don't run agents, and its CC harness breaks subscription
-billing. What's still a candidate for channel ②'s brain: `chat()` + tools +
-built-in **MCP client** (→ plug shikigami-bridge) + **realtime voice / TTS /
-transcription** (OpenAI, ElevenLabs). Caveat: its STT is cloud; user wants
-**local (Mac) STT** → likely a custom whisper.cpp adapter. TS/web → pairs with
-Tauri, not with Native SDK. Undecided; revisit when scoping channel ②.
-
-## Avatar direction (decided)
-
-- Soul: cozy **lofi companion** — idle "doing its own thing", reacts when an
-  agent event arrives. A character, not an orb.
-- Tech: **pre-baked AI video** (grok image→video) idle-loop + reaction clips,
-  ffmpeg ping-pong for seamless loop. Runtime = zero API, tiny files (~100-300KB).
-  Live2D only if we later need lots of live expression.
-- Lip-sync: audio-amplitude (RMS) → mouth crossfade from 2 frames.
-- API details in SumVox project memory ([[grok-imagine-api]],
-  [[avatar-rendering-direction]]).
-
-## Shell / stack
-
-**Tauri** lean (shared Rust core + web UI + per-platform shells; system webview
-makes web rendering portable). Confirm before scaffolding.
-
-**Omarchy / Hyprland (Wayland) caveats** — floating companion is well-supported
-(`float`+`pin` frees it from tiling; place via `move` rule), but:
-- Wayland clients **can't self-position** — `set_position` is a no-op; placement
-  = compositor `windowrule` or user drag. Persisting a dragged position is awkward.
-- **Global hotkey** must be bound in Hyprland config (`bind =`), not registered
-  by the app (Tauri global-shortcut is X11-only). Fits the "hotkey activates it" plan.
-- WebKitGTK transparency on Wayland is flaky → `WEBKIT_DISABLE_DMABUF_RENDERER=1`.
-- Avatar video codec: WebKitGTK uses system GStreamer → also bake a **VP9/webm**.
-- tray via SNI — works (Omarchy runs waybar).
-
-**Native SDK** (native-sdk.dev, Vercel's Zig native-UI toolkit, no WebView):
-would erase the WebKitGTK/Wayland pain, but (a) Zig = a 3rd language, (b) brand
-new, (c) ⚠️ unverified whether it can render our video/canvas avatar (it's a
-widget toolkit). On the radar; spike later, gated on the avatar question.
-NB: native-sdk.dev ≠ Vercel AI SDK (different products).
-
-## Naming (settled)
-
-- Product = **shikigami** (umbrella). crates.io `shikigami` is free.
-- Former `musingfox/shikigami` (browser/macOS control tool) → renamed
-  **shikigami-bridge** (`../shikigami-bridge`), the "hands", already speaks MCP.
-  Local dir renamed; **GitHub repo rename + this repo's new remote still PENDING**
-  (deferred by user — do the new project first, rename later).
-- Rejected: tama/tamago/kodama/tomo (collisions or "pet you raise" ≠ this).
-
-## Next (M0)
-
-M0 skeleton (repo + Tauri + hotkey-via-Hyprland + tray) → M1 channel ① (observe
-CC via hook/herdr → avatar reaction + spoken report; reuse SumVox) → M2 channel ②
-(voice command: STT → brain → send-keys/bridge) → M3 avatar polish → M4 per-platform.
-
-Open before building: (1) confirm Tauri, (2) herdr-first vs native-hooks-first
-for channel ①, (3) scope channel ② (and whether TanStack AI powers its brain),
-(4) atomize M0.
+- `../SumVox` — Rust CLI, summarize + TTS, owns the CC hook. The "mouth".
+- `../shikigami-bridge` — browser/macOS control, speaks MCP. The "hands".
+  (GitHub repo rename from `shikigami` still pending, deferred.)
+- PM: Obsidian vault "obsidian", `pm/shikigami/` (tasks/, archive/, docs/).
