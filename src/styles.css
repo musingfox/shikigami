@@ -10,12 +10,10 @@ body {
 }
 
 body {
+  position: relative;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: flex-start;
-  padding-top: 10px;
-  box-sizing: border-box;
+  justify-content: center;
 }
 
 #orb {
@@ -24,8 +22,12 @@ body {
   transition: opacity 0.4s ease;
 }
 
+/* bubble sits between the avatar and the screen center: default below
+   the blob, .above flips it, .lean-left hugs the center-facing side */
 #toast {
-  margin-top: 4px;
+  position: absolute;
+  top: calc(50% + 84px);
+  right: 12px;
   max-width: 200px;
   max-height: 76px;
   overflow: hidden;
@@ -36,6 +38,16 @@ body {
   font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
   opacity: 0;
   transition: opacity 0.4s ease;
+}
+
+#toast.above {
+  top: auto;
+  bottom: calc(50% + 84px);
+}
+
+#toast.lean-left {
+  right: auto;
+  left: 12px;
 }
 
 #toast.show {
