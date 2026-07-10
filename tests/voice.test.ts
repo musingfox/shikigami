@@ -60,15 +60,16 @@ test("T5: rms(Float32Array of zeros) -> 0", () => {
 });
 
 // VoiceErrorSurface T1
+import { errorText } from "../src/mic";
+
 test('T1: errorText("utterance too short") -> "⚠ utterance too short"', () => {
-  const msg = "utterance too short";
-  const displayed = "⚠ " + msg;
-  expect(displayed).toBe("⚠ utterance too short");
+  expect(errorText("utterance too short")).toBe("⚠ utterance too short");
 });
 
-// VoiceErrorSurface T2 (shape)
-test('T2: missing model invoke rejection surfaces path in toast + avatar idle', () => {
-  const err = "model not found: /Users/x/.config/shikigami/models/ggml-base.bin";
-  const toast = "⚠ STT " + err;
-  expect(toast.includes("ggml-base.bin")).toBe(true);
+// VoiceErrorSurface T2 (unit half; the full missing-model run is manual regression)
+test("T2: stage-labeled rejection keeps the model path visible", () => {
+  const err =
+    "stt: whisper model not found: /Users/x/.config/shikigami/models/ggml-base.bin";
+  expect(errorText(err).includes("ggml-base.bin")).toBe(true);
+  expect(errorText(err).startsWith("⚠ stt:")).toBe(true);
 });
