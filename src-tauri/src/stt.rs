@@ -36,7 +36,7 @@ fn get_ctx() -> Result<&'static WhisperContext, String> {
 }
 
 pub fn pcm_bytes_to_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("invalid PCM f32 bytes len".into());
     }
     let mut out = Vec::with_capacity(bytes.len() / 4);
@@ -75,9 +75,13 @@ pub fn transcribe(pcm: &[f32]) -> Result<String, String> {
         .map_err(|e| format!("whisper full: {}", e))?;
     let num = state.full_n_segments();
     let mut text = String::new();
-    // whisper segment text api varies by minor; stub for build, real model test is ignored
-    if num > 0 {
-        text.push_str(" ");
+    for i in 0..num {
+        if let Some(seg) = state.get_segment(i) {
+            match seg.to_str_lossy() {
+                Ok(s) => text.push_str(&s),
+                Err(e) => return Err(format!("whisper segment: {}", e)),
+            }
+        }
     }
     Ok(text.trim().to_string())
 }
