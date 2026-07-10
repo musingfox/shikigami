@@ -12,6 +12,12 @@ use tauri::Emitter;
 // ponytail: 500ms stat poll over 3 files; switch to vnode/notify if it ever matters
 const POLL: Duration = Duration::from_millis(500);
 
+pub fn dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".config")
+        .join("sumvox")
+}
+
 fn last_line(path: &PathBuf) -> Option<String> {
     let s = fs::read_to_string(path).ok()?;
     s.lines()
@@ -20,11 +26,15 @@ fn last_line(path: &PathBuf) -> Option<String> {
         .map(str::to_string)
 }
 
+// menus are main-thread-only on macOS
+fn refresh_tray(app: &tauri::AppHandle) {
+    let ah = app.clone();
+    let _ = app.run_on_main_thread(move || crate::tray::refresh(&ah));
+}
+
 pub fn spawn_watcher(app: tauri::AppHandle) {
     thread::spawn(move || {
-        let dir = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join(".config")
-            .join("sumvox");
+        let dir = dir();
         let np = dir.join("now_playing");
         let hist = dir.join("history.log");
         let muted = dir.join("muted");
@@ -57,6 +67,7 @@ pub fn spawn_watcher(app: tauri::AppHandle) {
                     eprintln!("[sumvox] history: {line}");
                     let _ = app.emit("sumvox:history", line);
                 }
+                refresh_tray(&app);
             }
 
             let mu = muted.exists();
@@ -64,6 +75,7 @@ pub fn spawn_watcher(app: tauri::AppHandle) {
                 is_muted = mu;
                 eprintln!("[sumvox] muted: {mu}");
                 let _ = app.emit("sumvox:muted", mu);
+                refresh_tray(&app);
             }
         }
     });

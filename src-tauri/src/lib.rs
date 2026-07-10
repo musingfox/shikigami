@@ -1,20 +1,5 @@
 mod sumvox;
-
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-    Manager,
-};
-
-fn toggle_main_window(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        if w.is_visible().unwrap_or(false) {
-            let _ = w.hide();
-        } else {
-            let _ = w.show();
-        }
-    }
-}
+mod tray;
 
 // raw bytes for the frontend's WebAudio decode (lip-sync envelope)
 #[tauri::command]
@@ -29,24 +14,13 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![read_file])
         .setup(|app| {
-            let toggle = MenuItem::with_id(app, "toggle", "Show / Hide", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&toggle, &quit])?;
-            TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "toggle" => toggle_main_window(app),
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .build(app)?;
-
+            tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());
 
             // ponytail: macOS only — Linux hotkey = Hyprland bind (M4), Wayland can't self-register
             #[cfg(target_os = "macos")]
             {
+                use tauri::Manager;
                 use tauri_plugin_global_shortcut::{
                     Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
                 };
@@ -59,7 +33,13 @@ pub fn run() {
                             if shortcut == &toggle_shortcut
                                 && event.state() == ShortcutState::Pressed
                             {
-                                toggle_main_window(app);
+                                if let Some(w) = app.get_webview_window("main") {
+                                    if w.is_visible().unwrap_or(false) {
+                                        let _ = w.hide();
+                                    } else {
+                                        let _ = w.show();
+                                    }
+                                }
                             }
                         })
                         .build(),
