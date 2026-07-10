@@ -17,8 +17,9 @@ body {
 }
 
 #orb {
-  width: 160px;
-  height: 160px;
+  /* canvas renders at 160 internally; CSS downscale keeps it crisp */
+  width: 120px;
+  height: 120px;
   transition: opacity 0.4s ease;
 }
 
@@ -26,7 +27,7 @@ body {
    the blob, .above flips it, .lean-left hugs the center-facing side */
 #toast {
   position: absolute;
-  top: calc(50% + 84px);
+  top: calc(50% + 66px);
   right: 12px;
   max-width: 200px;
   max-height: 76px;
@@ -42,7 +43,7 @@ body {
 
 #toast.above {
   top: auto;
-  bottom: calc(50% + 84px);
+  bottom: calc(50% + 66px);
 }
 
 #toast.lean-left {
