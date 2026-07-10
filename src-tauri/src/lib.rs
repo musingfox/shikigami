@@ -2,6 +2,7 @@ mod events;
 mod sumvox;
 mod tray;
 mod brain;
+mod voice;
 
 // raw bytes for the frontend's WebAudio decode (lip-sync envelope)
 #[tauri::command]
@@ -11,10 +12,15 @@ fn read_file(path: String) -> Result<tauri::ipc::Response, String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn brain_reply(transcript: String) -> Result<String, String> {
+    voice::reply_to_transcript(&transcript).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file])
+        .invoke_handler(tauri::generate_handler![read_file, brain_reply])
         .setup(|app| {
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());
