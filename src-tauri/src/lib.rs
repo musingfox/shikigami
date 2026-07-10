@@ -1,3 +1,5 @@
+mod sumvox;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -30,6 +32,8 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            sumvox::spawn_watcher(app.handle().clone());
 
             // ponytail: macOS only — Linux hotkey = Hyprland bind (M4), Wayland can't self-register
             #[cfg(target_os = "macos")]
