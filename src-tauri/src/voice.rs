@@ -79,3 +79,8 @@ mod tests {
         assert_eq!(shortcut_action(false, ShortcutState::Pressed, false), VoiceShortcut::ToggleWindow);
     }
 }
+
+pub fn transcribe_bytes(pcm: Vec<u8>) -> Result<String, String> {
+    let f = crate::stt::pcm_bytes_to_f32(&pcm)?;
+    crate::stt::transcribe(&f)
+}

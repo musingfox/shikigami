@@ -3,6 +3,7 @@ mod sumvox;
 mod tray;
 mod brain;
 mod voice;
+mod stt;
 use tauri::Emitter;
 use crate::events::VOICE_LISTENING;
 
