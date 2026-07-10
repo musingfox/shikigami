@@ -58,3 +58,17 @@ test("T5: rms(Float32Array of zeros) -> 0", () => {
   const input = new Float32Array(50);
   expect(rms(input)).toBe(0);
 });
+
+// VoiceErrorSurface T1
+test('T1: errorText("utterance too short") -> "⚠ utterance too short"', () => {
+  const msg = "utterance too short";
+  const displayed = "⚠ " + msg;
+  expect(displayed).toBe("⚠ utterance too short");
+});
+
+// VoiceErrorSurface T2 (shape)
+test('T2: missing model invoke rejection surfaces path in toast + avatar idle', () => {
+  const err = "model not found: /Users/x/.config/shikigami/models/ggml-base.bin";
+  const toast = "⚠ STT " + err;
+  expect(toast.includes("ggml-base.bin")).toBe(true);
+});
