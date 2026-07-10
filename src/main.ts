@@ -1,4 +1,5 @@
 // Composition root: wires core events to the presentation modules.
+// Mic capture (getUserMedia/Audio downsample) initialized via initMic(); see mic.ts for process_utterance bytes path.
 // Only core event names appear here — adapter-specific formats stay in Rust.
 
 import { listen } from "@tauri-apps/api/event";

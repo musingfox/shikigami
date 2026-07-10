@@ -16,3 +16,11 @@ echo "sk-ant-..." > ~/.config/shikigami/anthropic_api_key
 ```
 
 macOS note: file perms should be 600.
+
+## Microphone Permission (MicUtteranceCapture)
+
+Hold Cmd+Ctrl+M to record. Uses webview getUserMedia (downsampled 16 kHz mono f32 on-device).
+
+macOS: first run may prompt; if dev spike, grant in System Settings > Privacy & Security > Microphone for the dev binary or built app.
+
+The app Info.plist declares NSMicrophoneUsageDescription.

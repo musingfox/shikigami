@@ -17,10 +17,20 @@ async fn brain_reply(transcript: String) -> Result<String, String> {
     voice::reply_to_transcript(&transcript).await
 }
 
+#[tauri::command]
+fn process_utterance(pcm: Vec<u8>) -> Result<(), String> {
+    // bytes are f32le mono 16k from frontend; consumed by stt later
+    // for this contract just accept to complete the invoke path
+    if pcm.is_empty() {
+        return Err("empty pcm".into());
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file, brain_reply])
+        .invoke_handler(tauri::generate_handler![read_file, brain_reply, process_utterance])
         .setup(|app| {
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());
