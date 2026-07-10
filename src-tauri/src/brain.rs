@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 const CONFIG_PATH: &str = ".config/shikigami/anthropic_api_key";
 const ANTHROPIC_API_BASE: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const MODEL: &str = "claude-haiku-4-5";
+const SYSTEM_PROMPT: &str = "你是式神，使用者的桌面語音助理。用使用者說話的語言簡潔回答，最多兩句，純文字、不用 Markdown，內容要適合直接朗讀。";
 
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
@@ -27,12 +29,10 @@ struct Message {
     content: String,
 }
 
+// serde ignores unknown fields (model, usage, thinking) by default
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
     content: Vec<ContentBlock>,
-    #[allow(dead_code)]
-    model: String,
-    usage: Usage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,16 +41,6 @@ struct ContentBlock {
     content_type: String,
     #[serde(default)]
     text: Option<String>,
-    #[serde(default)]
-    thinking: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Usage {
-    #[allow(dead_code)]
-    input_tokens: u32,
-    #[allow(dead_code)]
-    output_tokens: u32,
 }
 
 pub fn resolve_api_key(env: Option<&str>, file_content: Option<&str>) -> Result<String, String> {
@@ -94,19 +84,22 @@ fn http_client() -> Client {
         .unwrap_or_else(|_| Client::new())
 }
 
-pub async fn ask_claude(transcript: &str) -> Result<String, String> {
-    let api_key = load_api_key()?;
-    let url = format!("{}/messages", ANTHROPIC_API_BASE);
-
-    let req = AnthropicRequest {
-        model: "claude-haiku-4-5".to_string(),
+fn build_request(transcript: &str) -> AnthropicRequest {
+    AnthropicRequest {
+        model: MODEL.to_string(),
         max_tokens: 300,
         messages: vec![Message {
             role: "user".to_string(),
             content: transcript.to_string(),
         }],
-        system: Some("You are a concise spoken-style assistant. Reply in the language of the question. Keep answers short, natural, one or two sentences. No markdown, no lists unless asked.".to_string()),
-    };
+        system: Some(SYSTEM_PROMPT.to_string()),
+    }
+}
+
+pub async fn ask_claude(transcript: &str) -> Result<String, String> {
+    let api_key = load_api_key()?;
+    let url = format!("{}/messages", ANTHROPIC_API_BASE);
+    let req = build_request(transcript);
 
     let response = http_client()
         .post(&url)
@@ -134,7 +127,7 @@ pub async fn ask_claude(transcript: &str) -> Result<String, String> {
     extract_reply(parsed)
 }
 
-pub fn extract_reply(resp: AnthropicResponse) -> Result<String, String> {
+fn extract_reply(resp: AnthropicResponse) -> Result<String, String> {
     if resp.content.is_empty() {
         return Err("empty reply from brain".to_string());
     }
@@ -151,20 +144,6 @@ pub fn extract_reply(resp: AnthropicResponse) -> Result<String, String> {
         return Err("empty reply from brain".to_string());
     }
     Ok(text)
-}
-
-// helper for T1 contract test
-pub fn serialize_request_for_test(transcript: &str) -> String {
-    let req = AnthropicRequest {
-        model: "claude-haiku-4-5".to_string(),
-        max_tokens: 300,
-        messages: vec![Message {
-            role: "user".to_string(),
-            content: transcript.to_string(),
-        }],
-        system: Some("You are a concise spoken-style assistant. Reply in the language of the question. Keep answers short, natural, one or two sentences. No markdown, no lists unless asked.".to_string()),
-    };
-    serde_json::to_string(&req).unwrap()
 }
 
 #[cfg(test)]
@@ -206,7 +185,7 @@ mod tests {
     // BrainReply contract tests (T1-T4 written first before body impl; T5 ignore manual)
     #[test]
     fn t1_serialize_request_for_hi() {
-        let json = serialize_request_for_test("hi");
+        let json = serde_json::to_string(&build_request("hi")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["model"], "claude-haiku-4-5");
         assert_eq!(v["max_tokens"], 300);
@@ -217,60 +196,29 @@ mod tests {
 
     #[test]
     fn t2_extract_reply_simple_text() {
-        let resp = AnthropicResponse {
-            content: vec![ContentBlock {
-                content_type: "text".to_string(),
-                text: Some("你好".to_string()),
-                thinking: None,
-            }],
-            model: "claude-haiku-4-5".to_string(),
-            usage: Usage {
-                input_tokens: 1,
-                output_tokens: 1,
-            },
-        };
+        let resp: AnthropicResponse = serde_json::from_str(
+            r#"{"content":[{"type":"text","text":"你好"}],"model":"m","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .unwrap();
         assert_eq!(extract_reply(resp).unwrap(), "你好");
     }
 
     #[test]
     fn t3_extract_reply_skips_thinking_and_joins_text() {
-        let resp = AnthropicResponse {
-            content: vec![
-                ContentBlock {
-                    content_type: "thinking".to_string(),
-                    text: None,
-                    thinking: Some("ignored".to_string()),
-                },
-                ContentBlock {
-                    content_type: "text".to_string(),
-                    text: Some("a".to_string()),
-                    thinking: None,
-                },
-                ContentBlock {
-                    content_type: "text".to_string(),
-                    text: Some("b".to_string()),
-                    thinking: None,
-                },
-            ],
-            model: "x".to_string(),
-            usage: Usage {
-                input_tokens: 1,
-                output_tokens: 1,
-            },
-        };
+        let resp: AnthropicResponse = serde_json::from_str(
+            r#"{"content":[
+                {"type":"thinking","thinking":"ignored"},
+                {"type":"text","text":"a"},
+                {"type":"text","text":"b"}
+            ]}"#,
+        )
+        .unwrap();
         assert_eq!(extract_reply(resp).unwrap(), "ab");
     }
 
     #[test]
     fn t4_extract_reply_empty_content_err() {
-        let resp = AnthropicResponse {
-            content: vec![],
-            model: "x".to_string(),
-            usage: Usage {
-                input_tokens: 0,
-                output_tokens: 0,
-            },
-        };
+        let resp: AnthropicResponse = serde_json::from_str(r#"{"content":[]}"#).unwrap();
         let err = extract_reply(resp).unwrap_err();
         assert!(err.contains("empty"));
     }
