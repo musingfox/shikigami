@@ -15,51 +15,8 @@ body {
   justify-content: center;
 }
 
-#avatar {
-  position: relative;
-  width: 140px;
-  height: 140px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #b8a7e8, #7a63c4 70%);
-  box-shadow: 0 8px 24px rgba(60, 40, 120, 0.35);
-  animation: breathe 4s ease-in-out infinite;
-}
-
-.eye {
-  position: absolute;
-  top: 52px;
-  width: 12px;
-  height: 16px;
-  border-radius: 50%;
-  background: #2b2140;
-  animation: blink 5s infinite;
-}
-
-.eye.left {
-  left: 42px;
-}
-
-.eye.right {
-  right: 42px;
-}
-
-@keyframes breathe {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.04) translateY(-2px);
-  }
-}
-
-@keyframes blink {
-  0%,
-  94%,
-  100% {
-    transform: scaleY(1);
-  }
-  97% {
-    transform: scaleY(0.08);
-  }
+#orb {
+  width: 160px;
+  height: 160px;
+  transition: opacity 0.4s ease;
 }

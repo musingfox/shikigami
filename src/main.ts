@@ -1,2 +1,3 @@
-// ponytail: placeholder — avatar reactions (M1) and voice pipeline (M2) hook in here.
-export {};
+import { initAvatar } from "./avatar";
+
+initAvatar(document.getElementById("orb") as HTMLCanvasElement);
