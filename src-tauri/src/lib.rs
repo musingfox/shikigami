@@ -16,9 +16,18 @@ fn toggle_main_window(app: &tauri::AppHandle) {
     }
 }
 
+// raw bytes for the frontend's WebAudio decode (lip-sync envelope)
+#[tauri::command]
+fn read_file(path: String) -> Result<tauri::ipc::Response, String> {
+    std::fs::read(&path)
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![read_file])
         .setup(|app| {
             let toggle = MenuItem::with_id(app, "toggle", "Show / Hide", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
