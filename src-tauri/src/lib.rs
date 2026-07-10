@@ -3,6 +3,8 @@ mod sumvox;
 mod tray;
 mod brain;
 mod voice;
+use tauri::Emitter;
+use crate::events::VOICE_LISTENING;
 
 // raw bytes for the frontend's WebAudio decode (lip-sync envelope)
 #[tauri::command]
@@ -20,7 +22,6 @@ async fn brain_reply(transcript: String) -> Result<String, String> {
 #[tauri::command]
 fn process_utterance(pcm: Vec<u8>) -> Result<(), String> {
     // bytes are f32le mono 16k from frontend; consumed by stt later
-    // for this contract just accept to complete the invoke path
     if pcm.is_empty() {
         return Err("empty pcm".into());
     }
@@ -45,24 +46,31 @@ pub fn run() {
 
                 let toggle_shortcut =
                     Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyS);
+                let ptt_shortcut =
+                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyM);
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, shortcut, event| {
-                            if shortcut == &toggle_shortcut
-                                && event.state() == ShortcutState::Pressed
-                            {
-                                if let Some(w) = app.get_webview_window("main") {
-                                    if w.is_visible().unwrap_or(false) {
-                                        let _ = w.hide();
-                                    } else {
-                                        let _ = w.show();
+                            let st = event.state();
+                            if shortcut == &toggle_shortcut {
+                                if st == ShortcutState::Pressed {
+                                    if let Some(w) = app.get_webview_window("main") {
+                                        if w.is_visible().unwrap_or(false) {
+                                            let _ = w.hide();
+                                        } else {
+                                            let _ = w.show();
+                                        }
                                     }
                                 }
+                            } else if shortcut == &ptt_shortcut {
+                                let is_pressed = st == ShortcutState::Pressed;
+                                let _ = app.emit(VOICE_LISTENING, is_pressed);
                             }
                         })
                         .build(),
                 )?;
                 app.global_shortcut().register(toggle_shortcut)?;
+                app.global_shortcut().register(ptt_shortcut)?;
             }
             Ok(())
         })
