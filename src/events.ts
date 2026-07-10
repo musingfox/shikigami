@@ -11,3 +11,4 @@ export type Report = {
   ts: string;
   text: string;
 };
+// MicUtteranceCapture uses core voice:* events + process_utterance invoke (bytes f32).
