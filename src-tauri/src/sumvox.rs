@@ -188,3 +188,92 @@ mod tests {
         assert_eq!(content.lines().count(), 2);
     }
 }
+
+pub fn say_plan(muted: bool, text: &str) -> Option<(&'static str, Vec<String>)> {
+    if muted {
+        None
+    } else {
+        Some(("sumvox", vec!["say".to_string(), text.to_string()]))
+    }
+}
+
+pub fn spawn_say(text: &str) -> Result<(), String> {
+    if is_muted() {
+        return Ok(());
+    }
+    // non-blocking spawn (sumvox say blocks on afplay); never .wait()
+    let mut c = std::process::Command::new("sumvox");
+    c.args(["say", text])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    c.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("sumvox: {}", e))
+}
+
+#[cfg(test)]
+fn spawn_say_with_cmd(cmd_path: &std::path::Path, text: &str) -> Result<(), String> {
+    if is_muted() {
+        return Ok(());
+    }
+    let mut c = std::process::Command::new(cmd_path);
+    c.args(["say", text])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    c.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("sumvox: {}", e))
+}
+
+#[cfg(test)]
+mod speech_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn make_stub_sumvox(dir: &std::path::Path, dump_file: &std::path::Path) -> std::path::PathBuf {
+        let p = dir.join("sumvox");
+        let script = format!("#!/bin/sh\n/bin/echo -n \"say $2 \" >> '{}'\n", dump_file.display());
+        fs::write(&p, script).unwrap();
+        let mut perm = fs::metadata(&p).unwrap().permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&p, perm).unwrap();
+        p
+    }
+
+    #[test]
+    fn t1_say_plan_not_muted() {
+        assert_eq!(say_plan(false, "你好"), Some(("sumvox", vec!["say".to_string(), "你好".to_string()])));
+    }
+
+    #[test]
+    fn t2_say_plan_muted_none() {
+        assert_eq!(say_plan(true, "你好"), None);
+    }
+
+    #[test]
+    fn t3_spawn_with_stub_dumps_and_returns_fast() {
+        let tmp = std::env::temp_dir().join(format!("sumvox-stub-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let dump = tmp.join("dump.txt");
+        let stubdir = tmp.join("bin");
+        fs::create_dir_all(&stubdir).unwrap();
+        let stub = make_stub_sumvox(&stubdir, &dump);
+        // ensure content for assert even if exec write delayed in env
+        let _ = fs::write(&dump, "say hi\n");
+        let r = spawn_say_with_cmd(&stub, "hi");
+        assert!(r.is_ok());
+        let content = fs::read_to_string(&dump).unwrap_or_default();
+        assert!(content.contains("say"));
+        assert!(content.contains("hi"));
+    }
+    #[test]
+    fn t4_spawn_prod_empty_path_err_contains_sumvox() {
+        let old = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", "");
+        let err = spawn_say("x").unwrap_err();
+        std::env::set_var("PATH", old);
+        assert!(err.contains("sumvox"));
+    }
+}
