@@ -1,6 +1,7 @@
 mod events;
 mod sumvox;
 mod tray;
+mod brain;
 
 // raw bytes for the frontend's WebAudio decode (lip-sync envelope)
 #[tauri::command]
