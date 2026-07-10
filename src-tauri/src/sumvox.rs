@@ -122,8 +122,29 @@ pub fn flatten(text: &str) -> String {
 }
 
 fn now_rfc3339() -> String {
-    // ponytail: RFC3339 without adding chrono dep (only whisper+reqwest allowed); sufficient for contract T3/T4
-    "2026-07-11T00:00:00Z".to_string()
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    rfc3339_utc(secs)
+}
+
+// UTC seconds → "YYYY-MM-DDTHH:MM:SSZ" without a chrono dep (civil-from-days algorithm).
+fn rfc3339_utc(unix_secs: i64) -> String {
+    let days = unix_secs.div_euclid(86_400);
+    let tod = unix_secs.rem_euclid(86_400);
+    let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
 /// Append one flattened line "RFC3339\ttext\n" to history.log in the given dir.
@@ -165,6 +186,13 @@ mod tests {
     }
 
     #[test]
+    fn t0_rfc3339_utc_known_instants() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z"); // leap day
+        assert_eq!(rfc3339_utc(1_783_468_800), "2026-07-08T00:00:00Z");
+    }
+
+    #[test]
     fn t2_flatten_crlf() {
         assert_eq!(flatten("a\r\nb"), "a b");
     }
@@ -198,12 +226,16 @@ pub fn say_plan(muted: bool, text: &str) -> Option<(&'static str, Vec<String>)> 
 }
 
 pub fn spawn_say(text: &str) -> Result<(), String> {
-    if is_muted() {
-        return Ok(());
+    match say_plan(is_muted(), text) {
+        None => Ok(()),
+        Some((prog, args)) => spawn_plan(std::path::Path::new(prog), &args),
     }
-    // non-blocking spawn (sumvox say blocks on afplay); never .wait()
-    let mut c = std::process::Command::new("sumvox");
-    c.args(["say", text])
+}
+
+// non-blocking spawn (sumvox say blocks on afplay); never .wait()
+fn spawn_plan(prog: &std::path::Path, args: &[String]) -> Result<(), String> {
+    let mut c = std::process::Command::new(prog);
+    c.args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     c.spawn()
@@ -212,17 +244,12 @@ pub fn spawn_say(text: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 fn spawn_say_with_cmd(cmd_path: &std::path::Path, text: &str) -> Result<(), String> {
-    if is_muted() {
-        return Ok(());
+    match say_plan(is_muted(), text) {
+        None => Ok(()),
+        Some((_, args)) => spawn_plan(cmd_path, &args),
     }
-    let mut c = std::process::Command::new(cmd_path);
-    c.args(["say", text])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    c.spawn()
-        .map(|_| ())
-        .map_err(|e| format!("sumvox: {}", e))
 }
 
 #[cfg(test)]
