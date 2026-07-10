@@ -11,6 +11,10 @@ pub const AGENT_SPEECH: &str = "agent:speech";
 pub const AGENT_REPORT: &str = "agent:report";
 /// Voice output mute state changed; payload = bool.
 pub const VOICE_MUTED: &str = "voice:muted";
+/// PTT is active; payload = bool (true while held).
+pub const VOICE_LISTENING: &str = "voice:listening";
+/// Live transcript text for display; payload = string.
+pub const VOICE_TRANSCRIPT: &str = "voice:transcript";
 
 #[derive(Serialize, Clone)]
 pub struct Report {
