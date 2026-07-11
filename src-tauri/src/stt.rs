@@ -125,8 +125,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).ok();
         std::env::set_var("HOME", &tmp);
-        let err = model_path().to_string_lossy().to_string(); // trigger via get
-        // call get will err with path
         let res = get_ctx();
         if let Some(h) = old_home {
             std::env::set_var("HOME", h);

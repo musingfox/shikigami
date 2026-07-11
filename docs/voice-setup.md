@@ -1,21 +1,29 @@
 # Voice Setup
 
-## Anthropic API Key (ApiKeyResolution)
+## Brain provider + API key (ApiKeyResolution)
 
-The app resolves the key as follows:
+Three providers are supported; the app picks the first one with a key
+available, cheapest first: **gemini → openai → anthropic**. Override with
+`SHIKIGAMI_BRAIN=gemini|openai|anthropic`.
 
-1. `ANTHROPIC_API_KEY` environment variable (preferred)
-2. `~/.config/shikigami/anthropic_api_key` (file contents trimmed)
+Per provider, the key resolves env-first, then a key file (contents trimmed):
 
-If neither, error message includes both locations.
+| Provider | Env | Key file (`~/.config/shikigami/`) | Model |
+|---|---|---|---|
+| gemini | `GEMINI_API_KEY` | `gemini_api_key` | gemini-2.5-flash |
+| openai | `OPENAI_API_KEY` | `openai_api_key` | gpt-4.1-mini |
+| anthropic | `ANTHROPIC_API_KEY` | `anthropic_api_key` | claude-haiku-4-5 |
 
-Create the file with your key:
+If no key is found anywhere, the error names all three env vars.
+
+Create a key file:
 ```
 mkdir -p ~/.config/shikigami
-echo "sk-ant-..." > ~/.config/shikigami/anthropic_api_key
+echo "AIza..." > ~/.config/shikigami/gemini_api_key
+chmod 600 ~/.config/shikigami/gemini_api_key
 ```
 
-macOS note: `chmod 600 ~/.config/shikigami/anthropic_api_key`.
+Models are constants in `src-tauri/src/brain.rs` (`Provider::model`).
 
 ## Microphone Permission (MicUtteranceCapture)
 

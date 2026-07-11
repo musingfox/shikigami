@@ -8,7 +8,7 @@ pub async fn reply_to_transcript(transcript: &str) -> Result<String, String> {
     if transcript.trim().is_empty() {
         return Err("empty transcript".to_string());
     }
-    brain::ask_claude(transcript).await
+    brain::ask(transcript).await
 }
 
 use tauri_plugin_global_shortcut::ShortcutState;
