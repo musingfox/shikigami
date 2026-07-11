@@ -59,13 +59,25 @@ pub fn validate_samples(n: usize) -> Result<usize, String> {
     Ok(n)
 }
 
+// zh-TW/en mixed speech: base-model auto-detect on short utterances often
+// locks onto English and drops the Chinese — pin zh, bias Traditional via
+// initial prompt. Override with SHIKIGAMI_STT_LANG=en/auto/... if needed.
+fn stt_language() -> String {
+    std::env::var("SHIKIGAMI_STT_LANG").unwrap_or_else(|_| "zh".to_string())
+}
+
 pub fn transcribe(pcm: &[f32]) -> Result<String, String> {
     let n = validate_samples(pcm.len())?;
     let samples = if n < pcm.len() { &pcm[..n] } else { pcm };
     let ctx = get_ctx()?;
     let mut state = ctx.create_state().map_err(|e| e.to_string())?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_language(Some("auto"));
+    let lang = stt_language();
+    params.set_language(Some(&lang));
+    params.set_translate(false);
+    if lang == "zh" {
+        params.set_initial_prompt("以下是繁體中文與英文混雜的對話。");
+    }
     params.set_print_progress(false);
     params.set_print_special(false);
     params.set_print_realtime(false);
