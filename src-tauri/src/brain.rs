@@ -10,7 +10,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde_json::{json, Value};
 
-const SYSTEM_PROMPT: &str = "你是式神，使用者的桌面語音助理。用使用者說話的語言簡潔回答，最多兩句，純文字、不用 Markdown，內容要適合直接朗讀。";
+const SYSTEM_PROMPT: &str = "你是式神，使用者的桌面語音助理。用使用者說話的語言簡潔回答，最多兩句，純文字、不用 Markdown，內容要適合直接朗讀。直接給答案，不要輸出思考過程、前言或自我說明。";
 const MAX_TOKENS: u32 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +115,12 @@ fn build_request(provider: Provider, transcript: &str) -> Value {
         Provider::Gemini => json!({
             "system_instruction": { "parts": [{ "text": SYSTEM_PROMPT }] },
             "contents": [{ "parts": [{ "text": transcript }] }],
-            "generationConfig": { "maxOutputTokens": MAX_TOKENS },
+            "generationConfig": {
+                "maxOutputTokens": MAX_TOKENS,
+                // 2.5-flash thinks by default AND thinking tokens eat
+                // maxOutputTokens — a spoken reply needs neither
+                "thinkingConfig": { "thinkingBudget": 0 },
+            },
         }),
         Provider::OpenAi => json!({
             "model": provider.model(),
@@ -141,6 +146,7 @@ fn extract_reply(provider: Provider, v: &Value) -> Result<String, String> {
             .map(|parts| {
                 parts
                     .iter()
+                    .filter(|p| p["thought"] != true) // skip thought-summary parts
                     .filter_map(|p| p["text"].as_str())
                     .collect::<Vec<_>>()
                     .join("")
@@ -309,6 +315,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(v["generationConfig"]["maxOutputTokens"], 300);
+        assert_eq!(v["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0);
     }
 
     #[test]
@@ -346,6 +353,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(extract_reply(Provider::OpenAi, &v).unwrap(), "你好");
+    }
+
+    #[test]
+    fn t2d_extract_gemini_skips_thought_parts() {
+        let v: Value = serde_json::from_str(
+            r#"{"candidates":[{"content":{"parts":[
+                {"text":"讓我想想…","thought":true},
+                {"text":"天空是藍色的因為瑞利散射。"}
+            ],"role":"model"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_reply(Provider::Gemini, &v).unwrap(),
+            "天空是藍色的因為瑞利散射。"
+        );
     }
 
     #[test]
