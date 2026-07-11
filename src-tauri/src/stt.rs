@@ -1,5 +1,5 @@
 // STT via whisper-rs (on-device, 16kHz mono f32).
-// Lazy cached context; model at ~/.config/shikigami/models/ggml-base.bin
+// Lazy cached context; model at ~/.config/shikigami/models/ (see MODEL_NAME)
 // ponytail: new dep only whisper+reqwest already; no per call reload.
 
 use std::path::PathBuf;
@@ -7,12 +7,19 @@ use std::sync::OnceLock;
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-const MODEL_NAME: &str = "ggml-base.bin";
+// Breeze-ASR-25 (MediaTek, whisper-large-v2 fine-tune) — built for Taiwanese
+// Mandarin + zh/en code-switching. Override file with SHIKIGAMI_STT_MODEL
+// (bare filename under models/, or absolute path).
+const MODEL_NAME: &str = "breeze-asr-25-q5_k.bin";
 
 pub fn model_path() -> PathBuf {
+    let name = std::env::var("SHIKIGAMI_STT_MODEL").unwrap_or_else(|_| MODEL_NAME.to_string());
+    if name.starts_with('/') {
+        return PathBuf::from(name);
+    }
     let mut p = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     p.push(".config/shikigami/models");
-    p.push(MODEL_NAME);
+    p.push(name);
     p
 }
 
@@ -59,9 +66,8 @@ pub fn validate_samples(n: usize) -> Result<usize, String> {
     Ok(n)
 }
 
-// zh-TW/en mixed speech: base-model auto-detect on short utterances often
-// locks onto English and drops the Chinese — pin zh, bias Traditional via
-// initial prompt. Override with SHIKIGAMI_STT_LANG=en/auto/... if needed.
+// zh-TW/en mixed speech: auto-detect on short utterances often locks onto
+// English and drops the Chinese — pin zh. Override with SHIKIGAMI_STT_LANG.
 fn stt_language() -> String {
     std::env::var("SHIKIGAMI_STT_LANG").unwrap_or_else(|_| "zh".to_string())
 }
@@ -75,9 +81,6 @@ pub fn transcribe(pcm: &[f32]) -> Result<String, String> {
     let lang = stt_language();
     params.set_language(Some(&lang));
     params.set_translate(false);
-    if lang == "zh" {
-        params.set_initial_prompt("以下是繁體中文與英文混雜的對話。");
-    }
     params.set_print_progress(false);
     params.set_print_special(false);
     params.set_print_realtime(false);
@@ -144,7 +147,7 @@ mod tests {
             std::env::remove_var("HOME");
         }
         let e = res.unwrap_err();
-        assert!(e.contains("ggml-base.bin"));
+        assert!(e.contains(MODEL_NAME));
     }
 
     #[test]

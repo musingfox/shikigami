@@ -35,17 +35,19 @@ The app Info.plist declares NSMicrophoneUsageDescription.
 
 ## Whisper Model (UtteranceTranscription)
 
-STT runs on-device via whisper.cpp; the model is a one-time manual download
-(multilingual base, ~142 MB — chosen for zh-TW/English mixed speech):
+STT runs on-device via whisper.cpp. Default model = **Breeze-ASR-25 q5_k**
+(MediaTek whisper-large-v2 fine-tune for Taiwanese Mandarin + zh/en
+code-switching, ~1 GB), one-time manual download:
 
 ```
 mkdir -p ~/.config/shikigami/models
-curl -L -o ~/.config/shikigami/models/ggml-base.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+curl -L -o ~/.config/shikigami/models/breeze-asr-25-q5_k.bin \
+  https://huggingface.co/alan314159/Breeze-ASR-25-whispercpp/resolve/main/ggml-model-q5_k.bin
 ```
 
-Accuracy not good enough? Drop in `ggml-small.bin` (~466 MB, slower) and
-change `MODEL_NAME` in `src-tauri/src/stt.rs` — one constant.
+Language is pinned to zh (`SHIKIGAMI_STT_LANG` to override). Swap models with
+`SHIKIGAMI_STT_MODEL` (filename under `models/`, or absolute path) — e.g.
+`ggml-base.bin` for a fast generic multilingual model.
 
 ## Manual regression (end-to-end voice loop)
 
