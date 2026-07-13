@@ -7,9 +7,10 @@
     <link rel="stylesheet" href="/src/styles.css" />
     <script type="module" src="/src/main.ts" defer></script>
   </head>
-  <!-- ContextMenuRouting: document-level contextmenu always preventDefault via menu.ts handle; only orb hit (48px) opens radial; drag-region on body/orb does not fire on rightclick per tauri behavior -->
+  <!-- ContextMenuRouting: document-level contextmenu always preventDefault via menu.ts handle; only orb hit (48px) opens radial; drag-region on body/toast does not fire on rightclick per tauri behavior -->
+  <!-- #orb has NO drag-region: main.ts routes its left press by hand (click = talk toggle, move >4px = startDragging) -->
   <body data-tauri-drag-region>
-    <canvas id="orb" data-tauri-drag-region></canvas>
+    <canvas id="orb"></canvas>
     <div id="toast" data-tauri-drag-region></div>
   </body>
 </html>
