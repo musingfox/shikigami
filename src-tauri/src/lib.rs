@@ -15,6 +15,35 @@ fn read_file(path: String) -> Result<tauri::ipc::Response, String> {
         .map_err(|e| e.to_string())
 }
 
+// toggle full mute flag (for radial menu + tray sync); returns the *new* state
+#[tauri::command]
+fn toggle_mute(app: tauri::AppHandle) -> bool {
+    let dir = sumvox::config_dir();
+    let new_state = sumvox::toggle_muted_in(&dir);
+    // tray check item must update immediately; run_on_main_thread per sumvox.rs:66-69 convention
+    let ah = app.clone();
+    let _ = app.run_on_main_thread(move || crate::tray::refresh(&ah));
+    new_state
+}
+
+// query current muted synchronously (no reliance on startup emit timing)
+#[tauri::command]
+fn get_muted() -> bool {
+    sumvox::muted_in(&sumvox::config_dir())
+}
+
+// open SumVox config dir via Finder; thin wrapper over shared spawn (same plan as tray's open-config)
+#[tauri::command]
+fn open_config() -> Result<(), String> {
+    sumvox::spawn_open_config(&sumvox::config_dir())
+}
+
+// quit from the radial menu (parity with tray Quit)
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 // Full voice loop: pcm f32le@16k → whisper STT → transcript event → brain → speak-back.
 // Errors carry a stage label ("stt:"/"brain:"/"speak:") for the frontend toast.
 // ponytail: pcm crosses IPC as a JSON byte array; switch to InvokeBody::Raw if latency matters
@@ -36,7 +65,7 @@ async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), St
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file, process_utterance])
+        .invoke_handler(tauri::generate_handler![read_file, process_utterance, toggle_mute, get_muted, open_config, quit_app])
         .setup(|app| {
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());

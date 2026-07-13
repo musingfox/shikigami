@@ -19,17 +19,31 @@ pub fn config_dir() -> PathBuf {
         .join("sumvox")
 }
 
-pub fn is_muted() -> bool {
-    config_dir().join("muted").exists()
+pub fn muted_in(dir: &std::path::Path) -> bool {
+    dir.join("muted").exists()
 }
 
-pub fn set_muted(on: bool) {
-    let flag = config_dir().join("muted");
+pub fn set_muted_in(dir: &std::path::Path, on: bool) {
+    let flag = dir.join("muted");
     let _ = if on {
         fs::write(&flag, "")
     } else {
         fs::remove_file(&flag)
     };
+}
+
+pub fn is_muted() -> bool {
+    muted_in(&config_dir())
+}
+
+pub fn set_muted(on: bool) {
+    set_muted_in(&config_dir(), on);
+}
+
+pub fn toggle_muted_in(dir: &std::path::Path) -> bool {
+    let on = !muted_in(dir);
+    set_muted_in(dir, on);
+    on
 }
 
 /// Latest reports, newest first.
@@ -163,6 +177,15 @@ pub fn record_to(dir: &std::path::Path, text: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+pub fn open_config_plan(dir: &std::path::Path) -> (&'static str, Vec<String>) {
+    ("open", vec![dir.to_string_lossy().to_string()])
+}
+
+pub fn spawn_open_config(dir: &std::path::Path) -> Result<(), String> {
+    let (prog, args) = open_config_plan(dir);
+    spawn_plan(std::path::Path::new(prog), &args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +237,42 @@ mod tests {
         record_to(&dir, "y").unwrap();
         let content = fs::read_to_string(dir.join("history.log")).unwrap();
         assert_eq!(content.lines().count(), 2);
+    }
+
+    #[test]
+    fn t5_mute_toggle_in_no_flag_returns_true_and_creates_flag() {
+        let dir = unique_test_dir();
+        let res = toggle_muted_in(&dir);
+        assert!(res, "T1: expect true");
+        assert!(dir.join("muted").exists(), "T1: muted file must exist");
+    }
+
+    #[test]
+    fn t6_mute_toggle_in_second_call_returns_false_and_removes_flag() {
+        let dir = unique_test_dir();
+        toggle_muted_in(&dir); // setup for T2
+        let res = toggle_muted_in(&dir);
+        assert!(!res, "T2: expect false");
+        assert!(!dir.join("muted").exists(), "T2: muted file must be gone");
+    }
+
+    #[test]
+    fn t7_muted_in_no_flag_returns_false() {
+        let dir = unique_test_dir();
+        assert!(!muted_in(&dir), "T1: expect false");
+    }
+
+    #[test]
+    fn t8_muted_in_after_set_muted_in_true_returns_true() {
+        let dir = unique_test_dir();
+        set_muted_in(&dir, true);
+        assert!(muted_in(&dir), "T2: expect true");
+    }
+
+    #[test]
+    fn t9_open_config_plan_returns_open_cmd_and_path() {
+        let p = std::path::Path::new("/tmp/x");
+        assert_eq!(open_config_plan(p), ("open", vec!["/tmp/x".to_string()]), "T1");
     }
 }
 

@@ -75,10 +75,8 @@ fn on_menu_event(app: &AppHandle, id: &str) {
             refresh(app); // watcher also refreshes, this just avoids the poll lag
         }
         "open-config" => {
-            // ponytail: macOS `open`; xdg-open when Linux lands (M4)
-            let _ = std::process::Command::new("open")
-                .arg(sumvox::config_dir())
-                .spawn();
+            // use shared spawn entry (which uses open_config_plan) for behavior parity with open_config command
+            let _ = sumvox::spawn_open_config(&sumvox::config_dir());
         }
         "quit" => app.exit(0),
         _ => {
