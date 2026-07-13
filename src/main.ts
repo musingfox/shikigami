@@ -8,10 +8,16 @@ import { initMic } from "./mic";
 import { AGENT_REPORT, AGENT_SPEECH, VOICE_MUTED, type Report } from "./events";
 import { lipsync } from "./lipsync";
 import { toast } from "./toast";
+import { initMenu, handleContextMenu, onMutedEvent } from "./menu";
 
 initAvatar(document.getElementById("orb") as HTMLCanvasElement);
 
 listen<string>(AGENT_SPEECH, (e) => lipsync(e.payload));
 initMic();
 listen<Report>(AGENT_REPORT, (e) => toast(e.payload.text));
-listen<boolean>(VOICE_MUTED, (e) => console.log("muted", e.payload));
+listen<boolean>(VOICE_MUTED, (e) => onMutedEvent(e.payload));
+
+initMenu();
+document.addEventListener("contextmenu", (e) => {
+  handleContextMenu(e);
+});
