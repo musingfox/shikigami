@@ -19,6 +19,7 @@ import {
   onMutedEvent,
   isOrbHit,
 } from "../src/menu";
+import { __resetFrameForTest } from "../src/window-frame";
 
 // FanLayout contract tests（ring=96, center 160/180, step 40°, 扇形對準 centerDeg）
 test("T1: given fanPositions(1, -90) -> expect [{x:160,y:84}] ±0.5", () => {
@@ -85,6 +86,7 @@ function makeStubEvent(x: number, y: number) {
 
 beforeEach(() => {
   resetTestRecords();
+  __resetFrameForTest(); // idle = small window, center 75/75
   __setTestModeForTest(true);
   setRegistryForTest([
     { id: "mute", label: (m: boolean) => (m ? "Unmute" : "Mute"), action: "toggle_mute" },
@@ -94,8 +96,9 @@ beforeEach(() => {
   if (isMenuOpenForTest()) dismissMenu("outside");
 });
 
-test("T1: given stub event (160,180)、選單關 -> expect 回傳 true、選單 open、preventDefault 被呼叫、渲染 2 個 item", () => {
-  const ev = makeStubEvent(160, 180);
+// right-click happens in the idle (small) window → orb center is 75/75
+test("T1: given stub event (75,75) 命中角色、選單關 -> expect 回傳 true、選單 open、preventDefault 被呼叫、渲染 2 個 item", () => {
+  const ev = makeStubEvent(75, 75);
   const ret = handleContextMenu(ev);
   expect(ret).toBe(true);
   const prevented = ev._prevented();
@@ -107,25 +110,25 @@ test("T1: given stub event (160,180)、選單關 -> expect 回傳 true、選單 
   expect(last.items?.length).toBe(2);
 });
 
-test("T2: given stub event (10,10)、選單關 -> expect 回傳 false、選單仍關、preventDefault 被呼叫", () => {
+test("T2: given stub event (10,10) 非命中、選單關 -> expect 回傳 false、選單仍關、preventDefault 被呼叫", () => {
   const ev = makeStubEvent(10, 10);
   const ret = handleContextMenu(ev);
   expect(ret).toBe(false);
   expect(isMenuOpenForTest()).toBe(false);
 });
 
-test("T3: given stub event (160,180)、選單已開 -> expect 選單收合（toggle）", () => {
-  const evOpen = makeStubEvent(160, 180);
+test("T3: given stub event (75,75)、選單已開 -> expect 選單收合（toggle）", () => {
+  const evOpen = makeStubEvent(75, 75);
   handleContextMenu(evOpen);
   expect(isMenuOpenForTest()).toBe(true);
-  const evAgain = makeStubEvent(160, 180);
+  const evAgain = makeStubEvent(75, 75);
   handleContextMenu(evAgain);
   expect(isMenuOpenForTest()).toBe(false);
 });
 
-test("T4: given registry 設為 [] 後 stub event (160,180) -> expect 不展開", () => {
+test("T4: given registry 設為 [] 後 stub event (75,75) -> expect 不展開", () => {
   setRegistryForTest([]);
-  const ev = makeStubEvent(160, 180);
+  const ev = makeStubEvent(75, 75);
   handleContextMenu(ev);
   expect(isMenuOpenForTest()).toBe(false);
 });
@@ -309,21 +312,22 @@ test("T3: given 選單關 → onMutedEvent(false) -> expect 僅快取更新、�
   expect(testMenuRenders.length).toBe(before);
 });
 
-// OrbHitTest contract tests
+// OrbHitTest contract tests (center passed explicitly = large-window center)
+const C = { x: 160, y: 180 };
 test("T1: given isOrbHit(160, 180) -> expect true", () => {
   resetTestRecords();
   __setTestModeForTest(true);
-  expect(isOrbHit(160, 180)).toBe(true);
+  expect(isOrbHit(160, 180, C)).toBe(true);
 });
 
 test("T2: given isOrbHit(10, 10) -> expect false", () => {
-  expect(isOrbHit(10, 10)).toBe(false);
+  expect(isOrbHit(10, 10, C)).toBe(false);
 });
 
 test("T3: given isOrbHit(160, 132) — 距中心恰 48 -> expect true（邊界含）", () => {
-  expect(isOrbHit(160, 132)).toBe(true);
+  expect(isOrbHit(160, 132, C)).toBe(true);
 });
 
 test("T4: given isOrbHit(160, 131) — 距中心 49 -> expect false", () => {
-  expect(isOrbHit(160, 131)).toBe(false);
+  expect(isOrbHit(160, 131, C)).toBe(false);
 });

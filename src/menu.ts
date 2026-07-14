@@ -1,6 +1,8 @@
 // Radial settings menu (DOM+CSS, zero new deps).
 // Box labels fan out from the orb toward the screen center (ring 96px,
-// 40° apart), window center 160/180 for 320x360.
+// 45° apart). Geometry uses the CURRENT window center: idle the window hugs
+// the avatar, so opening the menu first grows it (window-frame.ts) — the
+// menu renders against the enlarged center 160/180.
 // Mute state via get_muted/toggle_mute + VOICE_MUTED; open via open_config.
 // ponytail: hand-rolled DOM, no framework; test hooks mirror mic.ts exactly.
 
@@ -9,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { VOICE_MUTED } from "./events";
 import { toast } from "./toast";
+import { acquireLarge, releaseLarge, currentCenter, LARGE_W, LARGE_H } from "./window-frame";
 
 export type MenuItemDef = {
   id: string;
@@ -46,23 +49,23 @@ export function resetTestRecords() {
 
 export function __setTestModeForTest(v: boolean) { testMode = v; }
 export function __setInvokeForTest(fn: ((cmd: string) => Promise<unknown>) | null) { invokeImpl = fn ?? defaultInvoke; }
-// FanLayout: items fan around centerDeg (direction toward screen center), 40° apart
+// FanLayout: items fan around centerDeg (direction toward screen center), 45° apart
 const RING = 96;
-const CX = 160;
-const CY = 180;
 const FAN_STEP = 45;
-const WIN_W = 320;
-const WIN_H = 360;
 const EDGE = 10; // keep box + glow inside the window
 
-export function fanPositions(n: number, centerDeg: number): { x: number; y: number }[] {
+export function fanPositions(
+  n: number,
+  centerDeg: number,
+  center: { x: number; y: number } = { x: 160, y: 180 },
+): { x: number; y: number }[] {
   if (n <= 0) return [];
   const start = centerDeg - (FAN_STEP * (n - 1)) / 2;
   const positions: { x: number; y: number }[] = [];
   for (let i = 0; i < n; i++) {
     const theta = (start + FAN_STEP * i) * (Math.PI / 180);
-    const x = CX + RING * Math.cos(theta);
-    const y = CY + RING * Math.sin(theta);
+    const x = center.x + RING * Math.cos(theta);
+    const y = center.y + RING * Math.sin(theta);
     positions.push({ x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 });
   }
   return positions;
@@ -85,10 +88,14 @@ async function fanAngleToScreenCenter(): Promise<number> {
   return Math.atan2(dy, dx) * (180 / Math.PI);
 }
 
-// placeholder for other contracts; real impl below as we add contracts
-export function isOrbHit(x: number, y: number): boolean {
-  const dx = x - CX;
-  const dy = y - CY;
+// hit test against the current window center (default = live center)
+export function isOrbHit(
+  x: number,
+  y: number,
+  center: { x: number; y: number } = currentCenter(),
+): boolean {
+  const dx = x - center.x;
+  const dy = y - center.y;
   return dx * dx + dy * dy <= 48 * 48;
 }
 
@@ -101,8 +108,8 @@ function ensureMenuEl(): HTMLDivElement {
   menuEl.style.position = "fixed";
   menuEl.style.left = "0";
   menuEl.style.top = "0";
-  menuEl.style.width = "320px";
-  menuEl.style.height = "360px";
+  menuEl.style.width = `${LARGE_W}px`;
+  menuEl.style.height = `${LARGE_H}px`;
   menuEl.style.pointerEvents = "none";
   menuEl.style.zIndex = "1000"; // above toast
   document.body.appendChild(menuEl);
@@ -125,29 +132,34 @@ export function openMenu(angleDeg?: number) {
     return;
   }
   menuOpen = true;
-  const angleP = angleDeg !== undefined
-    ? Promise.resolve(angleDeg)
-    : fanAngleToScreenCenter().catch(() => -90);
-  angleP.then((deg) => {
+  // grow the window first so the menu has room and geometry uses the large center
+  acquireLarge().then(() => {
     if (!menuOpen) return;
-    fanAngle = deg;
-    renderMenu(buildMenuItems(registry, mutedCache));
-    invokeImpl("get_muted").then((v) => {
-      const m = !!v;
-      if (m !== mutedCache) {
-        mutedCache = m;
-        if (menuOpen) renderMenu(buildMenuItems(registry, mutedCache));
-      }
-    }).catch(() => {});
+    const angleP = angleDeg !== undefined
+      ? Promise.resolve(angleDeg)
+      : fanAngleToScreenCenter().catch(() => -90);
+    return angleP.then((deg) => {
+      if (!menuOpen) return;
+      fanAngle = deg;
+      renderMenu(buildMenuItems(registry, mutedCache));
+      invokeImpl("get_muted").then((v) => {
+        const m = !!v;
+        if (m !== mutedCache) {
+          mutedCache = m;
+          if (menuOpen) renderMenu(buildMenuItems(registry, mutedCache));
+        }
+      }).catch(() => {});
+    });
   });
 }
 
 function renderMenu(items: { id: string; label: string; active: boolean }[]) {
   const el = ensureMenuEl();
   el.innerHTML = "";
-  const pos = fanPositions(items.length, fanAngle);
+  const c = currentCenter();
+  const pos = fanPositions(items.length, fanAngle, c);
   items.forEach((it, i) => {
-    const p = pos[i] || { x: CX, y: CY };
+    const p = pos[i] || { x: c.x, y: c.y };
     const btn = document.createElement("button");
     btn.setAttribute("role", "menuitem");
     btn.dataset.id = it.id;
@@ -156,12 +168,12 @@ function renderMenu(items: { id: string; label: string; active: boolean }[]) {
     btn.style.opacity = "0";
     el.appendChild(btn);
     // box anchored (centered) at its fan slot, clamped inside the window by its real size
-    const x = Math.min(WIN_W - EDGE - btn.offsetWidth / 2, Math.max(EDGE + btn.offsetWidth / 2, p.x));
-    const y = Math.min(WIN_H - EDGE - btn.offsetHeight / 2, Math.max(EDGE + btn.offsetHeight / 2, p.y));
+    const x = Math.min(LARGE_W - EDGE - btn.offsetWidth / 2, Math.max(EDGE + btn.offsetWidth / 2, p.x));
+    const y = Math.min(LARGE_H - EDGE - btn.offsetHeight / 2, Math.max(EDGE + btn.offsetHeight / 2, p.y));
     btn.style.left = `${x}px`;
     btn.style.top = `${y}px`;
     // launched from the orb center
-    btn.style.transform = `translate(calc(-50% + ${CX - x}px), calc(-50% + ${CY - y}px)) scale(0.3)`;
+    btn.style.transform = `translate(calc(-50% + ${c.x - x}px), calc(-50% + ${c.y - y}px)) scale(0.3)`;
     setTimeout(() => {
       if (btn.isConnected) {
         btn.style.opacity = "1";
@@ -175,15 +187,17 @@ function renderMenu(items: { id: string; label: string; active: boolean }[]) {
 
 export function dismissMenu(reason: "escape" | "outside") {
   if (!menuOpen) return;
-  if (testMode) testDismissCalls.push(reason);
-  if (!testMode) {
-    const el = menuEl;
-    if (el) {
-      el.innerHTML = "";
-    }
+  if (testMode) {
+    testDismissCalls.push(reason);
+    currentItems = [];
+    menuOpen = false;
+    return;
   }
+  const el = menuEl;
+  if (el) el.innerHTML = "";
   currentItems = [];
   menuOpen = false;
+  releaseLarge(); // shrink back to hug the avatar
 }
 
 export function activateItem(id: string) {

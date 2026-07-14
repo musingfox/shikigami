@@ -1,0 +1,43 @@
+import { test, expect, beforeEach } from "bun:test";
+import {
+  acquireLarge,
+  releaseLarge,
+  currentCenter,
+  __isLargeForTest,
+  __refsForTest,
+  __resetFrameForTest,
+} from "../src/window-frame";
+
+// No Tauri runtime under bun → applySize catches and just flips the flag,
+// which is exactly the ref-counting + center behavior we want to pin.
+beforeEach(() => __resetFrameForTest());
+
+test("idle center is the small-window center 75/75", () => {
+  expect(currentCenter()).toEqual({ x: 75, y: 75 });
+  expect(__isLargeForTest()).toBe(false);
+});
+
+test("acquireLarge grows to large center 160/180, ref 1", async () => {
+  await acquireLarge();
+  expect(__isLargeForTest()).toBe(true);
+  expect(__refsForTest()).toBe(1);
+  expect(currentCenter()).toEqual({ x: 160, y: 180 });
+});
+
+test("nested acquire holds large until refs return to 0", async () => {
+  await acquireLarge();
+  await acquireLarge();
+  expect(__refsForTest()).toBe(2);
+  await releaseLarge();
+  expect(__isLargeForTest()).toBe(true); // still held by the second acquire
+  await releaseLarge();
+  expect(__refsForTest()).toBe(0);
+  expect(__isLargeForTest()).toBe(false);
+  expect(currentCenter()).toEqual({ x: 75, y: 75 });
+});
+
+test("release below zero clamps at 0 and stays small", async () => {
+  await releaseLarge();
+  expect(__refsForTest()).toBe(0);
+  expect(__isLargeForTest()).toBe(false);
+});
