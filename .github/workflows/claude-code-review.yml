@@ -51,6 +51,12 @@ jobs:
             only — high signal, no style nits. Then post exactly one summary comment
             on the PR with `gh pr comment`, listing any issues found (file:line +
             why), or stating there are no blocking issues if the diff is clean.
+          # Plain prompt mode does NOT auto-allow Bash, so gh calls are denied and
+          # the review can't even fetch the diff (result: "gh commands are being
+          # blocked"). Grant just the gh verbs it needs; Read/Grep/Task are already
+          # in the base tool set, so this adds to them rather than replacing.
+          claude_args: |
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)"
           show_full_output: true # keep the review text in the Actions log for audit
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
 
