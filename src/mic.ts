@@ -132,11 +132,16 @@ let nativeSampleRate = 48000;
 async function startCapture() {
   if (typeof navigator === "undefined" || !navigator.mediaDevices) return; // test / no mic
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 48000, channelCount: 1 } });
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+    });
     const W = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext };
     const AC = W.AudioContext || W.webkitAudioContext || AudioContext;
-    audioCtx = new AC();
-    nativeSampleRate = audioCtx.sampleRate || 48000;
+    // Ask WebKit for a 16kHz context so it does the (properly anti-aliased)
+    // resample. resampleTo16k below then no-ops. If the UA ignores the request,
+    // nativeSampleRate reflects the real rate and the naive fallback still runs.
+    audioCtx = new AC({ sampleRate: 16000 });
+    nativeSampleRate = audioCtx.sampleRate || 16000;
     source = audioCtx.createMediaStreamSource(mediaStream!);
     processor = audioCtx.createScriptProcessor(4096, 1, 1);
     capturedSamples = [];
