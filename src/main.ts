@@ -10,6 +10,7 @@ import { AGENT_REPORT, AGENT_SPEECH, VOICE_MUTED, type Report } from "./events";
 import { lipsync } from "./lipsync";
 import { toast } from "./toast";
 import { initMenu, handleContextMenu, onMutedEvent, isOrbHit, isMenuOpen } from "./menu";
+import { orbGesture } from "./orb-gesture";
 
 initAvatar(document.getElementById("orb") as HTMLCanvasElement);
 
@@ -23,24 +24,23 @@ document.addEventListener("contextmenu", (e) => {
   handleContextMenu(e);
 });
 
-// Orb left press: double-click = talk, single press+hold = drag.
-// startDragging() must fire on mousedown or macOS won't latch the native drag,
-// and it then consumes the click — so talk can't be a single click. Instead we
-// branch on e.detail: the 2nd mousedown of a double-click (detail===2) toggles
-// talk; any other press starts the drag (a plain click just no-ops in place).
-// A press that dismisses an open menu must not drag or talk.
+// Orb left press: double-click = talk, single press+hold = drag, menu-dismiss
+// = neither. startDragging() must fire on mousedown or macOS won't latch the
+// native drag, and it then consumes the click — so talk can't be a single
+// click. orbGesture() owns the routing (and the sequence-latched menu guard);
+// see orb-gesture.ts.
 const orb = document.getElementById("orb")!;
 orb.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return;
   if (!isOrbHit(e.clientX, e.clientY)) return;
-  if (isMenuOpen()) return; // let the menu dismiss instead
-  if (e.detail === 2) {
+  const action = orbGesture(e.detail, isMenuOpen());
+  if (action === "talk") {
     toggleTalk();
-    return;
-  }
-  try {
-    getCurrentWindow().startDragging().catch(() => {});
-  } catch {
-    // browser preview: no Tauri runtime
+  } else if (action === "drag") {
+    try {
+      getCurrentWindow().startDragging().catch(() => {});
+    } catch {
+      // browser preview: no Tauri runtime
+    }
   }
 });
