@@ -29,7 +29,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0 # full history so the review can diff against the base
 
       - name: Run Claude Code Review
         id: claude-review
@@ -38,14 +38,17 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # The command declares these allowed-tools in its own frontmatter, but
-          # the action does NOT auto-honor them in CI: on a clean PR the review
-          # runs fully yet every post attempt is denied (permission_denials), so
-          # it lands silently. Re-granting the command's tool set via claude_args
-          # (--allowedTools ADDS to the always-present base tools) lets it post.
-          # (The command also self-skips a PR Claude has already commented on.)
-          claude_args: |
-            --allowedTools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),mcp__github_inline_comment__create_inline_comment"
+          # Config notes (all sourced from open claude-code-action issues):
+          # - pull-requests: write above — the installer template ships `read`,
+          #   which silently swallows the post 403 (#1121).
+          # - `--comment` nudges the session to actually post; without it a
+          #   review with findings can end on TodoWrite and post nothing (#1087).
+          # - NO claude_args --allowedTools: base tools are GitHub-only, so
+          #   listing tools there starves the review's Read/Grep/Task subagents.
+          # - permission_denials_count is benign sandbox probing, not the blocker.
+          # - A clean PR (no high-signal issue) stays silent by design (#1054);
+          #   the command also self-skips a PR Claude has already commented on.
+          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          show_full_output: true # keep the review text in the Actions log for audit
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
 
