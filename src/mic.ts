@@ -91,31 +91,6 @@ function surfaceError(msg: string) {
   recordLevel(0);
 }
 
-export function isListening() {
-  return listening;
-}
-
-// Orb left-click toggle: first click starts capture, second stops and sends.
-// Shares `listening` with the PTT path so hotkey and click stay consistent.
-export async function toggleTalk(): Promise<boolean> {
-  if (!listening) {
-    listening = true;
-    recordSpeak(true);
-    await startCapture();
-    if (!testMode && !mediaStream) {
-      // mic failed (surfaceError already toasted) → back to idle
-      listening = false;
-      recordSpeak(false);
-    }
-  } else {
-    listening = false;
-    recordSpeak(false);
-    recordLevel(0);
-    await stopCaptureAndSend();
-  }
-  return listening;
-}
-
 // test-only hook for driving state without tauri listen (used by voice.test.ts T1)
 export function __setListeningForTest(on: boolean) {
   listening = on;

@@ -59,30 +59,6 @@ test("T5: rms(Float32Array of zeros) -> 0", () => {
   expect(rms(input)).toBe(0);
 });
 
-// OrbTalkToggle contract tests
-import { toggleTalk, isListening } from "../src/mic";
-
-test("T1: toggleTalk() 從 idle -> expect 回傳 true、isListening true、setSpeaking(true)", async () => {
-  resetTestRecords();
-  if (isListening()) await toggleTalk();
-  resetTestRecords();
-  const on = await toggleTalk();
-  expect(on).toBe(true);
-  expect(isListening()).toBe(true);
-  expect(testSpeakCalls).toEqual([true]);
-});
-
-test("T2: 再 toggleTalk() -> expect 回傳 false、isListening false、setSpeaking(false)、setLevel(0)", async () => {
-  resetTestRecords();
-  if (!isListening()) await toggleTalk();
-  resetTestRecords();
-  const on = await toggleTalk();
-  expect(on).toBe(false);
-  expect(isListening()).toBe(false);
-  expect(testSpeakCalls).toEqual([false]);
-  expect(testLevelCalls).toEqual([0]);
-});
-
 // VoiceErrorSurface T1
 import { errorText } from "../src/mic";
 
