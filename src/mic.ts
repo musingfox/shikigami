@@ -101,12 +101,7 @@ export async function toggleTalk(): Promise<boolean> {
   if (!listening) {
     listening = true;
     recordSpeak(true);
-    await startCapture();
-    if (!testMode && !mediaStream) {
-      // mic failed (surfaceError already toasted) → back to idle
-      listening = false;
-      recordSpeak(false);
-    }
+    await startCaptureOrRollback();
   } else {
     listening = false;
     recordSpeak(false);
@@ -186,8 +181,21 @@ async function stopCaptureAndSend() {
   }
 }
 
+// Start capture, and if the mic couldn't be acquired roll `listening` back —
+// surfaceError has already toasted and reset the avatar, so a leftover
+// listening===true would desync state (the next toggleTalk would take the
+// "stop" branch and silently no-op). Shared by the PTT hotkey path and the
+// double-click toggle so both recover identically.
+async function startCaptureOrRollback() {
+  await startCapture();
+  if (!testMode && !mediaStream) {
+    listening = false;
+    recordSpeak(false);
+  }
+}
+
 export async function startMicIfListening() {
-  if (listening) await startCapture();
+  if (listening) await startCaptureOrRollback();
 }
 
 export async function stopMicAndSend() {
