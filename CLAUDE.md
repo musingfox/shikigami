@@ -98,5 +98,6 @@ creates/removes `~/.config/sumvox/muted`.
 
 - `../SumVox` — Rust CLI, summarize + TTS, owns the CC hook. The "mouth".
 - `../shikigami-bridge` — browser/macOS control, speaks MCP. The "hands".
-  (GitHub repo rename from `shikigami` still pending, deferred.)
+  (GitHub repo renamed `shikigami` → `shikigami-bridge` on 2026-07-14;
+  `musingfox/shikigami` now hosts this aggregator repo.)
 - PM: Obsidian vault "obsidian", `pm/shikigami/` (tasks/, archive/, docs/).
