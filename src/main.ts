@@ -5,7 +5,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { initAvatar } from "./avatar";
-import { initMic } from "./mic";
+import { initMic, toggleTalk } from "./mic";
 import { AGENT_REPORT, AGENT_SPEECH, VOICE_MUTED, type Report } from "./events";
 import { lipsync } from "./lipsync";
 import { toast } from "./toast";
@@ -23,16 +23,21 @@ document.addEventListener("contextmenu", (e) => {
   handleContextMenu(e);
 });
 
-// Orb left press = window drag, started immediately so it feels native (macOS
-// takes over the mouse the moment startDragging is called; a deferred call
-// wouldn't latch onto the drag). The canvas has no drag-region attribute so we
-// call it by hand. A press that dismisses an open menu must not also drag.
-// Talk lives on the Cmd+Ctrl+M push-to-talk hotkey.
+// Orb left press: double-click = talk, single press+hold = drag.
+// startDragging() must fire on mousedown or macOS won't latch the native drag,
+// and it then consumes the click — so talk can't be a single click. Instead we
+// branch on e.detail: the 2nd mousedown of a double-click (detail===2) toggles
+// talk; any other press starts the drag (a plain click just no-ops in place).
+// A press that dismisses an open menu must not drag or talk.
 const orb = document.getElementById("orb")!;
 orb.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return;
   if (!isOrbHit(e.clientX, e.clientY)) return;
-  if (isMenuOpen()) return; // let the menu dismiss instead of dragging
+  if (isMenuOpen()) return; // let the menu dismiss instead
+  if (e.detail === 2) {
+    toggleTalk();
+    return;
+  }
   try {
     getCurrentWindow().startDragging().catch(() => {});
   } catch {
