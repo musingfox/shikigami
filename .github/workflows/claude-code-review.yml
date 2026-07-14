@@ -38,11 +38,11 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          # --comment makes the code-review command actually post its findings;
-          # without it the review runs but stays in the transcript ("No buffered
-          # inline comments"). The command declares its own allowed-tools, so no
-          # claude_args --allowedTools is needed (it only interferes).
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # NOTE: the code-review command self-skips a PR that Claude has already
+          # commented on (see step 1 of its definition), and posts its findings
+          # itself — it needs no --comment flag and no claude_args --allowedTools
+          # (it declares its own allowed-tools). The one real fix was granting
+          # pull-requests: write above.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
 
