@@ -3,11 +3,27 @@
 // center: above/below the blob and leaning toward the center side.
 
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
+import { acquireLarge, releaseLarge } from "./window-frame";
 
 const CHAR_MS = 30;
 const HOLD_MS = 3000;
 
 let gen = 0;
+
+// hold the window large while a toast is visible (idle window is too small for it)
+let holding = false;
+function hold() {
+  if (!holding) {
+    holding = true;
+    acquireLarge();
+  }
+}
+function unhold() {
+  if (holding) {
+    holding = false;
+    releaseLarge();
+  }
+}
 
 async function place(el: HTMLElement) {
   try {
@@ -33,6 +49,7 @@ export function toast(text: string) {
   const el = document.getElementById("toast")!;
   const my = ++gen;
   el.textContent = "";
+  hold();
   place(el).then(() => {
     if (my !== gen) return;
     el.classList.add("show");
@@ -44,7 +61,10 @@ export function toast(text: string) {
         setTimeout(type, CHAR_MS);
       } else {
         setTimeout(() => {
-          if (my === gen) el.classList.remove("show");
+          if (my === gen) {
+            el.classList.remove("show");
+            unhold();
+          }
         }, HOLD_MS);
       }
     };

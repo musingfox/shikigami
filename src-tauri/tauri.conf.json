@@ -15,8 +15,8 @@
     "windows": [
       {
         "title": "shikigami",
-        "width": 320,
-        "height": 360,
+        "width": 150,
+        "height": 150,
         "transparent": true,
         "decorations": false,
         "shadow": false,
