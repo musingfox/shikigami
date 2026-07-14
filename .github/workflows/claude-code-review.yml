@@ -36,19 +36,21 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          # Config notes (all sourced from open claude-code-action issues):
-          # - pull-requests: write above — the installer template ships `read`,
-          #   which silently swallows the post 403 (#1121).
-          # - `--comment` nudges the session to actually post; without it a
-          #   review with findings can end on TodoWrite and post nothing (#1087).
-          # - NO claude_args --allowedTools: base tools are GitHub-only, so
-          #   listing tools there starves the review's Read/Grep/Task subagents.
-          # - permission_denials_count is benign sandbox probing, not the blocker.
-          # - A clean PR (no high-signal issue) stays silent by design (#1054);
-          #   the command also self-skips a PR Claude has already commented on.
-          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # We deliberately do NOT use the code-review plugin: its multi-subagent
+          # orchestration launches the eligibility check as a background Task and
+          # then ends the session waiting for a notification the headless action
+          # never delivers, so the review stalls at step 1 (seen in show_full_output:
+          # result = "I'll wait for the background agent..."). A plain prompt runs
+          # the review inline — the same mechanism the @claude on-demand workflow
+          # uses successfully. pull-requests: write is required so the post isn't
+          # a silently-swallowed 403 (#1121).
+          prompt: |
+            Review pull request ${{ github.repository }}/pull/${{ github.event.pull_request.number }}.
+            Fetch the diff with `gh pr diff` and read the changed files. Focus on
+            correctness bugs, security, and logic/gesture races in the changed code
+            only — high signal, no style nits. Then post exactly one summary comment
+            on the PR with `gh pr comment`, listing any issues found (file:line +
+            why), or stating there are no blocking issues if the diff is clean.
           show_full_output: true # keep the review text in the Actions log for audit
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
 
