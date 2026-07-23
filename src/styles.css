@@ -55,27 +55,37 @@ body {
 #toast.show {
   opacity: 1;
 }
-/* roster strip: one status dot per observed agent, just above the orb.
-   Each button is a fixed 20px hit area; the visible dot is ::before so the
-   hover label (::after) doesn't inherit the grow transform. */
+/* roster bubbles: one breathing status bubble per observed agent, arced
+   around the orb's rim (positions computed in roster.ts). Each button is a
+   20px hit area; the visible bubble is ::before so the breathing/grow
+   transform never touches layout. Hidden while the radial menu is open. */
 #roster-strip {
-  position: absolute;
-  top: calc(50% - 75px);
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 2px;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
   z-index: 900; /* under menu (1000); transient toast overlap is fine */
 }
 
+body.menu-open #roster-strip,
+body.menu-open #roster-label {
+  display: none;
+}
+
 .roster-dot {
-  position: relative;
+  position: absolute;
   width: 20px;
   height: 20px;
   border: none;
   padding: 0;
   background: transparent;
   cursor: pointer;
+  pointer-events: auto;
+}
+
+/* breathe like the orb: a slow, soft swell */
+@keyframes roster-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50% { transform: scale(1.22); opacity: 1; }
 }
 
 .roster-dot::before {
@@ -84,9 +94,14 @@ body {
   inset: 4px;
   border-radius: 50%;
   background: #6b7280; /* unknown */
+  animation: roster-breathe 3.2s ease-in-out infinite;
+  animation-delay: inherit;
+}
+.roster-dot:hover::before {
+  animation: none;
+  transform: scale(1.6);
   transition: transform 120ms ease;
 }
-.roster-dot:hover::before { transform: scale(1.5); }
 .roster-dot[data-status="idle"]::before { background: #9ca3af; }
 .roster-dot[data-status="done"]::before { background: #60a5fa; }
 .roster-dot[data-status="working"]::before {
@@ -98,16 +113,10 @@ body {
   box-shadow: 0 0 6px rgba(245, 158, 11, 0.8);
 }
 
-/* hover label: "name · status" pill under the dot */
-.roster-dot::after {
-  content: attr(data-name) " · " attr(data-status);
-  position: absolute;
-  top: 22px;
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* hover label: "name · status" pill, positioned + clamped by roster.ts so
+   long names never clip at the window edge */
+#roster-label {
+  position: fixed;
   white-space: nowrap;
   padding: 2px 6px;
   border-radius: 6px;
@@ -117,9 +126,9 @@ body {
   opacity: 0;
   transition: opacity 120ms ease;
   pointer-events: none;
-  z-index: 10;
+  z-index: 950;
 }
-.roster-dot:hover::after { opacity: 1; }
+#roster-label.show { opacity: 1; }
 
 #radial-menu {
   position: fixed;

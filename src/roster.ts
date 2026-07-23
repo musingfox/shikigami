@@ -1,7 +1,9 @@
 // Roster strip + report attribution (R1c).
-// agent:roster / agent:status → status dots above the orb (click a dot to
-// toast "name: status"); agent:activity remembers who acted last so the next
-// SumVox report toast gets a name prefix.
+// agent:roster / agent:status → breathing status bubbles arced around the
+// orb's rim (hover grows one + shows a "name · status" label clamped inside
+// the window; click toasts); agent:activity remembers who acted last so the
+// next SumVox report toast gets a name prefix. Hidden while the radial menu
+// is open (body.menu-open, toggled by menu.ts).
 // ponytail: attribution is a 30s time-window correlation, not a join — hooks
 // were deliberately kept toast-free (R1b decision); test hooks mirror mic.ts.
 
@@ -16,6 +18,7 @@ import {
   type AgentStatusChange,
 } from "./events";
 import { toast } from "./toast";
+import { currentCenter } from "./window-frame";
 
 export const ATTRIBUTION_WINDOW_MS = 30_000;
 
@@ -62,6 +65,57 @@ export function attribute(text: string, now: number = Date.now()): string {
   return text;
 }
 
+// Bubbles sit on an arc hugging the orb's rim, centered straight up (-90°).
+export function arcPositions(
+  n: number,
+  center: { x: number; y: number },
+  radius = 66,
+  stepDeg = 24,
+): { x: number; y: number }[] {
+  if (n <= 0) return [];
+  const start = -90 - (stepDeg * (n - 1)) / 2;
+  const out: { x: number; y: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    const theta = ((start + stepDeg * i) * Math.PI) / 180;
+    out.push({
+      x: Math.round((center.x + radius * Math.cos(theta)) * 100) / 100,
+      y: Math.round((center.y + radius * Math.sin(theta)) * 100) / 100,
+    });
+  }
+  return out;
+}
+
+// Clamp the label's left edge so its full width stays inside the window.
+export function clampLabelX(centerX: number, width: number, winW: number, margin = 4): number {
+  return Math.min(winW - margin - width, Math.max(margin, centerX - width / 2));
+}
+
+const DOT = 20; // button hit size
+
+function labelEl(): HTMLDivElement {
+  let el = document.getElementById("roster-label") as HTMLDivElement | null;
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "roster-label";
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function showLabel(a: AgentEntry, at: { x: number; y: number }) {
+  const el = labelEl();
+  el.textContent = `${a.name} · ${a.status}`;
+  const winW = document.documentElement.clientWidth || 150;
+  // place first so offsetWidth is measurable, then clamp into the window
+  el.style.top = `${at.y + DOT / 2 + 4}px`;
+  el.style.left = `${clampLabelX(at.x, el.offsetWidth, winW)}px`;
+  el.classList.add("show");
+}
+
+function hideLabel() {
+  document.getElementById("roster-label")?.classList.remove("show");
+}
+
 function renderStrip() {
   if (testMode) {
     testStripRenders.push(roster.map((a) => ({ ...a })));
@@ -75,14 +129,22 @@ function renderStrip() {
     document.body.appendChild(el);
   }
   el.innerHTML = "";
-  for (const a of roster) {
+  hideLabel();
+  const pos = arcPositions(roster.length, currentCenter());
+  roster.forEach((a, i) => {
+    const p = pos[i];
     const dot = document.createElement("button");
     dot.className = "roster-dot";
     dot.dataset.status = a.status;
-    dot.dataset.name = a.name; // hover label reads this via attr()
+    dot.style.left = `${p.x - DOT / 2}px`;
+    dot.style.top = `${p.y - DOT / 2}px`;
+    // stagger the breathing so the flock feels alive, not metronomic
+    dot.style.animationDelay = `${i * 0.45}s`;
+    dot.onmouseenter = () => showLabel(a, p);
+    dot.onmouseleave = hideLabel;
     dot.onclick = () => toast(`${a.name}: ${a.status}`);
-    el.appendChild(dot);
-  }
+    el!.appendChild(dot);
+  });
 }
 
 export function initRoster() {
@@ -93,4 +155,6 @@ export function initRoster() {
   invoke<AgentEntry[]>("get_roster")
     .then((r) => setRoster(r ?? []))
     .catch(() => {});
+  // arc geometry depends on the window center — re-render on grow/shrink
+  window.addEventListener("resize", renderStrip);
 }

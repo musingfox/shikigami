@@ -130,6 +130,7 @@ export function openMenu(angleDeg?: number) {
     return;
   }
   menuOpen = true;
+  document.body.classList.add("menu-open"); // roster bubbles hide via CSS
   // grow the window first so the menu has room and geometry uses the large center
   acquireLarge().then(() => {
     if (!menuOpen) return;
@@ -195,6 +196,7 @@ export function dismissMenu(reason: "escape" | "outside") {
   if (el) el.innerHTML = "";
   currentItems = [];
   menuOpen = false;
+  document.body.classList.remove("menu-open");
   releaseLarge(); // shrink back to hug the avatar
 }
 

@@ -5,6 +5,8 @@ import {
   nameForPane,
   noteActivity,
   attribute,
+  arcPositions,
+  clampLabelX,
   ATTRIBUTION_WINDOW_MS,
   testStripRenders,
   __setTestModeForTest,
@@ -72,4 +74,24 @@ test("T6: 沒有 activity → 原文不動；pane 與 session 都空 → 不記"
   expect(attribute("素文", 999)).toBe("素文");
   noteActivity(activity("", ""), 1000);
   expect(attribute("素文", 1001)).toBe("素文");
+});
+
+test("T7: arcPositions n=1 正上方；n=4 左右對稱、全在圓心上方", () => {
+  const c = { x: 75, y: 75 };
+  const one = arcPositions(1, c, 66, 24);
+  expect(one).toEqual([{ x: 75, y: 9 }]); // -90°: straight up
+  const four = arcPositions(4, c, 66, 24);
+  expect(four.length).toBe(4);
+  // symmetric about x=75, ascending x, all above center
+  expect(four[0].x + four[3].x).toBeCloseTo(150, 1);
+  expect(four[1].x + four[2].x).toBeCloseTo(150, 1);
+  expect(four[0].x).toBeLessThan(four[1].x);
+  for (const p of four) expect(p.y).toBeLessThan(75);
+  expect(arcPositions(0, c)).toEqual([]);
+});
+
+test("T8: clampLabelX 置中、貼左緣、貼右緣", () => {
+  expect(clampLabelX(75, 50, 150)).toBe(50); // fits centered
+  expect(clampLabelX(10, 100, 150)).toBe(4); // clamps to left margin
+  expect(clampLabelX(140, 100, 150)).toBe(46); // clamps to right margin
 });
