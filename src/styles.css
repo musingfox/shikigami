@@ -55,6 +55,37 @@ body {
 #toast.show {
   opacity: 1;
 }
+/* roster strip: one status dot per observed agent, just above the orb */
+#roster-strip {
+  position: absolute;
+  top: calc(50% - 74px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  z-index: 900; /* under menu (1000); transient toast overlap is fine */
+}
+
+.roster-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  background: #6b7280; /* unknown */
+}
+.roster-dot[data-status="idle"] { background: #9ca3af; }
+.roster-dot[data-status="done"] { background: #60a5fa; }
+.roster-dot[data-status="working"] {
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.8);
+}
+.roster-dot[data-status="blocked"] {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.8);
+}
+
 #radial-menu {
   position: fixed;
   left: 0;

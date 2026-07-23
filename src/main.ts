@@ -11,12 +11,14 @@ import { lipsync } from "./lipsync";
 import { toast } from "./toast";
 import { initMenu, handleContextMenu, onMutedEvent, isOrbHit, isMenuOpen } from "./menu";
 import { orbGesture } from "./orb-gesture";
+import { initRoster, attribute } from "./roster";
 
 initAvatar(document.getElementById("orb") as HTMLCanvasElement);
 
 listen<string>(AGENT_SPEECH, (e) => lipsync(e.payload));
 initMic();
-listen<Report>(AGENT_REPORT, (e) => toast(e.payload.text));
+initRoster();
+listen<Report>(AGENT_REPORT, (e) => toast(attribute(e.payload.text)));
 listen<boolean>(VOICE_MUTED, (e) => onMutedEvent(e.payload));
 
 initMenu();
