@@ -105,8 +105,9 @@ export function labelText(a: AgentEntry): string {
 let selectedId: string | null = null;
 
 // Idle agents hide by default (they'd crowd the arc); a "+N" bubble at the
-// arc's end reveals them for summoning. Reveal auto-collapses on re-render
-// only if no idle agent is selected.
+// arc's end reveals them for summoning, "−" collapses. Sticky until the user
+// toggles it — auto-collapsing on re-render fought the click (2026-07-24 bug:
+// the reveal was undone by the very render it triggered).
 let showIdle = false;
 
 export function visibleRoster(
@@ -195,11 +196,7 @@ function renderStrip() {
   }
   el.innerHTML = "";
   dotEls = [];
-  // keep the reveal open while an idle agent is selected
   const selEntry = roster.find((a) => a.id === selectedId);
-  if (!(selEntry && selEntry.status === "idle")) {
-    if (showIdle && !selEntry) showIdle = false;
-  }
   const { shown, hiddenCount } = visibleRoster(roster, showIdle);
   const slots = shown.length + (hiddenCount > 0 ? 1 : 0);
   dotPos = arcPositions(slots, currentCenter());
