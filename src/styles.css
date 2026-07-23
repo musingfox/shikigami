@@ -114,7 +114,8 @@ body.menu-open #roster-label {
 /* hover label: fixed caption slot under the orb — appearing never disturbs
    the bubbles, and long names ellipsize inside the window. When a bubble is
    click-selected it turns sticky and gains action buttons (↗ jump / 🎙 talk). */
-#roster-label {
+#roster-label,
+#confirm-bar {
   position: fixed;
   top: calc(50% + 62px);
   left: 50%;
@@ -133,16 +134,20 @@ body.menu-open #roster-label {
   pointer-events: none;
   z-index: 950;
 }
-#roster-label.show { opacity: 1; }
-#roster-label.selected { pointer-events: auto; }
+#roster-label.show,
+#confirm-bar.show { opacity: 1; }
+#roster-label.selected,
+#confirm-bar.show { pointer-events: auto; }
 
-#roster-label span {
+#roster-label span,
+#confirm-bar span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#roster-label button {
+#roster-label button,
+#confirm-bar button {
   flex: none;
   border: 1px solid rgba(52, 211, 153, 0.5);
   border-radius: 4px;
@@ -152,7 +157,15 @@ body.menu-open #roster-label {
   padding: 2px 4px;
   cursor: pointer;
 }
-#roster-label button:hover { border-color: #22d3ee; color: #22d3ee; }
+#roster-label button:hover,
+#confirm-bar button:hover { border-color: #22d3ee; color: #22d3ee; }
+
+/* confirm-bar sits above the caption slot and outlives hover — amber accent
+   so a pending inject is unmistakable */
+#confirm-bar {
+  border: 1px solid rgba(245, 158, 11, 0.6);
+  z-index: 960;
+}
 
 #radial-menu {
   position: fixed;

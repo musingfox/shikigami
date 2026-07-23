@@ -17,6 +17,7 @@ import {
   type AgentEntry,
   type AgentStatusChange,
 } from "./events";
+import { startTargetedTalk } from "./command";
 import { toast } from "./toast";
 import { currentCenter } from "./window-frame";
 
@@ -133,7 +134,10 @@ function showLabel(a: AgentEntry, sticky = false) {
     const talk = document.createElement("button");
     talk.textContent = "🎙";
     talk.title = "對它說話";
-    talk.onclick = () => toast("對它說話：R2 接手中"); // ponytail: placeholder until R2 targeted talk
+    talk.onclick = () => {
+      deselect();
+      startTargetedTalk(a);
+    };
     el.append(jump, talk);
   }
   el.classList.toggle("selected", sticky);

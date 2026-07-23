@@ -95,6 +95,14 @@ export function isListening() {
   return listening;
 }
 
+// Targeted talk (R2a): command.ts registers an interceptor that gets first
+// claim on a finished utterance; returning true means "consumed, skip the
+// default process_utterance pipeline".
+let utteranceInterceptor: ((pcm: number[]) => Promise<boolean>) | null = null;
+export function setUtteranceInterceptor(fn: ((pcm: number[]) => Promise<boolean>) | null) {
+  utteranceInterceptor = fn;
+}
+
 // Double-click the orb to talk: first call starts capture, second stops+sends.
 // Rust owns the listening state (voice::LISTENING) — we just flip it there and
 // let the VOICE_LISTENING event drive capture, the exact same path as the PTT
@@ -188,8 +196,10 @@ async function stopCaptureAndSend() {
   const native = Float32Array.from(samples);
   const down = resampleTo16k(native, nativeSampleRate);
   const bytes = new Uint8Array(down.buffer);
+  const pcm = Array.from(bytes);
   try {
-    await invoke("process_utterance", { pcm: Array.from(bytes) });
+    if (utteranceInterceptor && (await utteranceInterceptor(pcm))) return;
+    await invoke("process_utterance", { pcm });
   } catch (e) {
     surfaceError(String(e));
   }

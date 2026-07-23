@@ -98,6 +98,15 @@ fn agent_entry(v: &Value) -> Option<AgentEntry> {
     Some(AgentEntry { id, name, pane, status, title, cwd })
 }
 
+/// Channel ② inject (R2a): submit a user-confirmed prompt to an agent.
+/// herdr's agent.prompt composes AND submits (documented semantics) — no
+/// key plumbing needed. Only ever called after the frontend confirm step.
+#[tauri::command]
+pub fn prompt_agent(pane: String, text: String) -> Result<(), String> {
+    call(0, "agent.prompt", serde_json::json!({ "target": pane, "text": text }))?;
+    Ok(())
+}
+
 /// Jump to an agent's pane: herdr switches workspace/pane focus, then we
 /// bring the terminal app forward.
 /// ponytail: terminal app hardcoded to Ghostty; configurable when needed.

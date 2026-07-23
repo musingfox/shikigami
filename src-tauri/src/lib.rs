@@ -83,10 +83,20 @@ async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), St
     Ok(())
 }
 
+// STT-only step for targeted talk (R2a): no brain, no speak-back — the
+// frontend owns the transcript-confirm-inject flow from here.
+#[tauri::command]
+async fn transcribe_utterance(pcm: Vec<u8>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || voice::transcribe_bytes(pcm))
+        .await
+        .map_err(|e| format!("stt: {e}"))?
+        .map_err(|e| format!("stt: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file, process_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, herdr::get_roster, herdr::focus_agent])
+        .invoke_handler(tauri::generate_handler![read_file, process_utterance, transcribe_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, herdr::get_roster, herdr::focus_agent, herdr::prompt_agent])
         .setup(|app| {
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());

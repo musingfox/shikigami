@@ -9,6 +9,7 @@ import { initMic, toggleTalk } from "./mic";
 import { AGENT_REPORT, AGENT_SPEECH, VOICE_MUTED, type Report } from "./events";
 import { lipsync } from "./lipsync";
 import { toast } from "./toast";
+import { initCommand } from "./command";
 import { initMenu, handleContextMenu, onMutedEvent, isOrbHit, isMenuOpen } from "./menu";
 import { orbGesture } from "./orb-gesture";
 import { initRoster, attribute } from "./roster";
@@ -18,6 +19,7 @@ initAvatar(document.getElementById("orb") as HTMLCanvasElement);
 listen<string>(AGENT_SPEECH, (e) => lipsync(e.payload));
 initMic();
 initRoster();
+initCommand();
 listen<Report>(AGENT_REPORT, (e) => toast(attribute(e.payload.text)));
 listen<boolean>(VOICE_MUTED, (e) => onMutedEvent(e.payload));
 
