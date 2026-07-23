@@ -19,6 +19,8 @@ pub const VOICE_TRANSCRIPT: &str = "voice:transcript";
 pub const AGENT_ROSTER: &str = "agent:roster";
 /// One agent's coarse status changed; payload = AgentStatusChange.
 pub const AGENT_STATUS: &str = "agent:status";
+/// Precise identity signal from an agent hook (never toasts); payload = Activity.
+pub const AGENT_ACTIVITY: &str = "agent:activity";
 
 #[derive(Serialize, Clone)]
 pub struct Report {
@@ -45,4 +47,18 @@ pub struct AgentEntry {
 pub struct AgentStatusChange {
     pub id: String,
     pub status: String,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+pub struct Activity {
+    /// which adapter produced this, e.g. "cchooks"
+    pub source: &'static str,
+    /// agent session id ("" when the hook payload carried none)
+    pub session: String,
+    /// pane address (HERDR_PANE_ID / TMUX_PANE, "" outside a multiplexer)
+    pub pane: String,
+    /// hook kind, e.g. "stop" | "notification"
+    pub kind: String,
+    /// RFC3339 timestamp stamped by the hook script
+    pub ts: String,
 }

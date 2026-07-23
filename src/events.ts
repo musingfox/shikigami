@@ -7,6 +7,7 @@ export const VOICE_LISTENING = "voice:listening"; // payload: boolean
 export const VOICE_TRANSCRIPT = "voice:transcript"; // payload: string (user text)
 export const AGENT_ROSTER = "agent:roster"; // payload: AgentEntry[]
 export const AGENT_STATUS = "agent:status"; // payload: AgentStatusChange
+export const AGENT_ACTIVITY = "agent:activity"; // payload: Activity (identity signal, never toasts)
 
 export type Report = {
   source: string;
@@ -24,5 +25,13 @@ export type AgentEntry = {
 export type AgentStatusChange = {
   id: string;
   status: string;
+};
+
+export type Activity = {
+  source: string; // e.g. "cchooks"
+  session: string; // agent session id ("" if unknown)
+  pane: string; // HERDR_PANE_ID / TMUX_PANE ("" outside a multiplexer)
+  kind: string; // "stop" | "notification"
+  ts: string; // RFC3339
 };
 // MicUtteranceCapture uses core voice:* events + process_utterance invoke (bytes f32).

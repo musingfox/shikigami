@@ -1,3 +1,4 @@
+mod cchooks;
 mod events;
 mod herdr;
 mod sumvox;
@@ -90,6 +91,7 @@ pub fn run() {
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());
             herdr::spawn_watcher(app.handle().clone());
+            cchooks::spawn_watcher(app.handle().clone());
 
             // ponytail: macOS only — Linux hotkey = Hyprland bind (M4), Wayland can't self-register
             #[cfg(target_os = "macos")]
