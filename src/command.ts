@@ -117,21 +117,42 @@ function showConfirm(t: Target, text: string) {
   }
   const el = confirmEl();
   el.innerHTML = "";
-  const span = document.createElement("span");
-  span.textContent = `→ ${t.name}：${text}`;
+  const head = document.createElement("span");
+  head.textContent = `→ ${t.name}`;
+  // transcript is editable before sending — STT is good, not perfect
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.rows = 2;
+  const autosize = () => {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 100)}px`;
+  };
+  input.oninput = autosize;
   const actions = document.createElement("div");
   actions.className = "actions";
   const ok = document.createElement("button");
   ok.textContent = "✓ 送出";
   ok.onclick = () => {
-    inject(t, text);
+    const edited = input.value.trim();
+    if (edited) inject(t, edited);
     hideConfirm();
   };
   const no = document.createElement("button");
   no.textContent = "✕ 取消";
   no.onclick = hideConfirm;
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      ok.click();
+    }
+  };
   actions.append(no, ok);
-  el.append(span, actions);
+  el.append(head, input, actions);
+  setTimeout(() => {
+    autosize();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }, 0);
   if (!confirmShown) {
     confirmShown = true;
     acquireLarge().then(() => el.classList.add("show"));
