@@ -104,6 +104,20 @@ export function labelText(a: AgentEntry): string {
 // Click-selected bubble (sticky caption + action buttons); null = hover mode.
 let selectedId: string | null = null;
 
+// Idle agents hide by default (they'd crowd the arc); a "+N" bubble at the
+// arc's end reveals them for summoning. Reveal auto-collapses on re-render
+// only if no idle agent is selected.
+let showIdle = false;
+
+export function visibleRoster(
+  all: AgentEntry[],
+  reveal: boolean,
+): { shown: AgentEntry[]; hiddenCount: number } {
+  if (reveal) return { shown: all, hiddenCount: 0 };
+  const shown = all.filter((a) => a.status !== "idle");
+  return { shown, hiddenCount: all.length - shown.length };
+}
+
 function labelEl(): HTMLDivElement {
   let el = document.getElementById("roster-label") as HTMLDivElement | null;
   if (!el) {
@@ -181,8 +195,15 @@ function renderStrip() {
   }
   el.innerHTML = "";
   dotEls = [];
-  dotPos = arcPositions(roster.length, currentCenter());
-  roster.forEach((a, i) => {
+  // keep the reveal open while an idle agent is selected
+  const selEntry = roster.find((a) => a.id === selectedId);
+  if (!(selEntry && selEntry.status === "idle")) {
+    if (showIdle && !selEntry) showIdle = false;
+  }
+  const { shown, hiddenCount } = visibleRoster(roster, showIdle);
+  const slots = shown.length + (hiddenCount > 0 ? 1 : 0);
+  dotPos = arcPositions(slots, currentCenter());
+  shown.forEach((a, i) => {
     const p = dotPos[i];
     const dot = document.createElement("button");
     dot.className = "roster-dot";
@@ -200,9 +221,31 @@ function renderStrip() {
     el!.appendChild(dot);
     dotEls.push(dot);
   });
+  if (hiddenCount > 0) {
+    const p = dotPos[slots - 1];
+    const more = document.createElement("button");
+    more.className = "roster-dot roster-more";
+    more.textContent = `+${hiddenCount}`;
+    more.title = `${hiddenCount} 個閒置中`;
+    more.style.left = `${p.x - DOT / 2}px`;
+    more.style.top = `${p.y - DOT / 2}px`;
+    more.onclick = () => { showIdle = true; renderStrip(); };
+    el!.appendChild(more);
+    dotEls.push(more);
+  } else if (showIdle && roster.some((a) => a.status === "idle")) {
+    // revealed state: give it a way back
+    const collapse = document.createElement("button");
+    collapse.className = "roster-dot roster-more";
+    collapse.textContent = "−";
+    collapse.title = "收合閒置";
+    const p = arcPositions(shown.length + 1, currentCenter())[shown.length];
+    collapse.style.left = `${p.x - DOT / 2}px`;
+    collapse.style.top = `${p.y - DOT / 2}px`;
+    collapse.onclick = () => { showIdle = false; deselect(); renderStrip(); };
+    el!.appendChild(collapse);
+  }
   // selection survives re-renders (status polls) as long as the agent exists
-  const sel = roster.find((a) => a.id === selectedId);
-  if (sel) showLabel(sel, true);
+  if (selEntry) showLabel(selEntry, true);
   else deselect();
 }
 

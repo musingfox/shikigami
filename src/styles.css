@@ -101,6 +101,18 @@ body.menu-open #roster-label {
   animation-delay: inherit;
 }
 .roster-dot[data-status="idle"]::before { background: #9ca3af; }
+
+/* "+N" summon bubble: reveals hidden idle agents */
+.roster-more {
+  color: #9ca3af;
+  font: 9px/20px ui-monospace, monospace;
+  text-align: center;
+  border-radius: 50%;
+  background: rgba(107, 114, 128, 0.25);
+  border: 1px dashed rgba(156, 163, 175, 0.6);
+}
+.roster-more::before { display: none; } /* no breathing dot underneath */
+.roster-more:hover { color: #d1d5db; border-color: #d1d5db; }
 .roster-dot[data-status="done"]::before { background: #60a5fa; }
 .roster-dot[data-status="working"]::before {
   background: #34d399;

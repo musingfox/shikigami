@@ -8,6 +8,7 @@ import {
   arcPositions,
   magnifyScale,
   labelText,
+  visibleRoster,
   ATTRIBUTION_WINDOW_MS,
   testStripRenders,
   __setTestModeForTest,
@@ -91,6 +92,25 @@ test("T7: arcPositions n=1 正上方；n=4 左右對稱、全在圓心上方", (
   expect(four[0].x).toBeLessThan(four[1].x);
   for (const p of four) expect(p.y).toBeLessThan(75);
   expect(arcPositions(0, c)).toEqual([]);
+});
+
+test("T10: visibleRoster 預設藏 idle、reveal 顯示全部", () => {
+  const all = [
+    entry("a", "alpha", "p1", "working"),
+    entry("b", "beta", "p2", "idle"),
+    entry("c", "gamma", "p3", "blocked"),
+    entry("d", "delta", "p4", "idle"),
+  ];
+  const hidden = visibleRoster(all, false);
+  expect(hidden.shown.map((a) => a.id)).toEqual(["a", "c"]);
+  expect(hidden.hiddenCount).toBe(2);
+  const revealed = visibleRoster(all, true);
+  expect(revealed.shown.length).toBe(4);
+  expect(revealed.hiddenCount).toBe(0);
+  // all idle → arc holds only the +N bubble
+  const allIdle = visibleRoster([entry("b", "beta", "p2", "idle")], false);
+  expect(allIdle.shown).toEqual([]);
+  expect(allIdle.hiddenCount).toBe(1);
 });
 
 test("T9: labelText 有 title 附加、無 title 只有 name·status", () => {
