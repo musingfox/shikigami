@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AgentEntry } from "./events";
 import { setUtteranceInterceptor, toggleTalk } from "./mic";
 import { toast } from "./toast";
+import { acquireLarge, releaseLarge } from "./window-frame";
 
 type Target = { pane: string; name: string };
 
@@ -66,6 +67,10 @@ function confirmEl(): HTMLDivElement {
   return el;
 }
 
+// Toast-style bubble (multi-line, full text visible), amber accent. Holds the
+// window large while pending, same ref-count dance as menu/toast.
+let confirmShown = false;
+
 function showConfirm(t: Target, text: string) {
   if (testMode) {
     testConfirms.push({ name: t.name, text });
@@ -75,20 +80,25 @@ function showConfirm(t: Target, text: string) {
   el.innerHTML = "";
   const span = document.createElement("span");
   span.textContent = `→ ${t.name}：${text}`;
-  span.title = text;
+  const actions = document.createElement("div");
+  actions.className = "actions";
   const ok = document.createElement("button");
-  ok.textContent = "✓";
-  ok.title = "送出";
+  ok.textContent = "✓ 送出";
   ok.onclick = () => {
     inject(t, text);
     hideConfirm();
   };
   const no = document.createElement("button");
-  no.textContent = "✕";
-  no.title = "取消";
+  no.textContent = "✕ 取消";
   no.onclick = hideConfirm;
-  el.append(span, ok, no);
-  el.classList.add("show");
+  actions.append(no, ok);
+  el.append(span, actions);
+  if (!confirmShown) {
+    confirmShown = true;
+    acquireLarge().then(() => el.classList.add("show"));
+  } else {
+    el.classList.add("show");
+  }
 }
 
 function inject(t: Target, text: string) {
@@ -103,6 +113,10 @@ function inject(t: Target, text: string) {
 
 function hideConfirm() {
   document.getElementById("confirm-bar")?.classList.remove("show");
+  if (confirmShown) {
+    confirmShown = false;
+    releaseLarge();
+  }
 }
 
 export function initCommand() {
