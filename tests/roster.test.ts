@@ -91,7 +91,7 @@ test("T7: arcPositions n=1 正上方；n=4 左右對稱、全在圓心上方", (
 });
 
 test("T8: magnifyScale 貼齊游標最大、影響圈外為 1、單調遞減", () => {
-  expect(magnifyScale(0)).toBeCloseTo(1.9, 5); // on the cursor: max
+  expect(magnifyScale(0)).toBeCloseTo(1.6, 5); // on the cursor: max
   expect(magnifyScale(48)).toBe(1); // at influence edge
   expect(magnifyScale(100)).toBe(1); // far away
   expect(magnifyScale(12)).toBeGreaterThan(magnifyScale(24));

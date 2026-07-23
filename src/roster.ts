@@ -86,7 +86,8 @@ export function arcPositions(
 }
 
 // macOS-dock magnification: scale by cursor distance, cosine falloff.
-export function magnifyScale(dist: number, influence = 48, maxScale = 1.9): number {
+// max 1.6 — with the 176px idle frame, edge bubbles stay inside the window.
+export function magnifyScale(dist: number, influence = 48, maxScale = 1.6): number {
   if (dist >= influence) return 1;
   return 1 + ((maxScale - 1) * (Math.cos((dist / influence) * Math.PI) + 1)) / 2;
 }

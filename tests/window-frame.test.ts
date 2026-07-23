@@ -12,8 +12,8 @@ import {
 // which is exactly the ref-counting + center behavior we want to pin.
 beforeEach(() => __resetFrameForTest());
 
-test("idle center is the small-window center 75/75", () => {
-  expect(currentCenter()).toEqual({ x: 75, y: 75 });
+test("idle center is the small-window center 88/88", () => {
+  expect(currentCenter()).toEqual({ x: 88, y: 88 });
   expect(__isLargeForTest()).toBe(false);
 });
 
@@ -33,7 +33,7 @@ test("nested acquire holds large until refs return to 0", async () => {
   await releaseLarge();
   expect(__refsForTest()).toBe(0);
   expect(__isLargeForTest()).toBe(false);
-  expect(currentCenter()).toEqual({ x: 75, y: 75 });
+  expect(currentCenter()).toEqual({ x: 88, y: 88 });
 });
 
 test("release below zero clamps at 0 and stays small", async () => {

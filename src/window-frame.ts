@@ -6,7 +6,9 @@
 
 import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 
-const SMALL = { w: 150, h: 150, cx: 75, cy: 75 };
+// 176: leaves ~13px of breathing room past the roster arc so dock-magnified
+// bubbles don't clip at the window edge
+const SMALL = { w: 176, h: 176, cx: 88, cy: 88 };
 const LARGE = { w: 320, h: 360, cx: 160, cy: 180 };
 
 let large = false;
