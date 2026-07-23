@@ -15,6 +15,10 @@ pub const VOICE_MUTED: &str = "voice:muted";
 pub const VOICE_LISTENING: &str = "voice:listening";
 /// Live transcript text for display; payload = string.
 pub const VOICE_TRANSCRIPT: &str = "voice:transcript";
+/// Roster of observed agents changed; payload = Vec<AgentEntry>.
+pub const AGENT_ROSTER: &str = "agent:roster";
+/// One agent's coarse status changed; payload = AgentStatusChange.
+pub const AGENT_STATUS: &str = "agent:status";
 
 #[derive(Serialize, Clone)]
 pub struct Report {
@@ -23,4 +27,22 @@ pub struct Report {
     /// RFC3339 timestamp ("" when the source line carried none)
     pub ts: String,
     pub text: String,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+pub struct AgentEntry {
+    /// stable identity (herdr terminal_id today)
+    pub id: String,
+    /// display name: agent-declared name, else cwd basename, else agent kind
+    pub name: String,
+    /// pane address, the injection target for channel ② (R2)
+    pub pane: String,
+    /// idle | working | blocked | done | unknown
+    pub status: String,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+pub struct AgentStatusChange {
+    pub id: String,
+    pub status: String,
 }

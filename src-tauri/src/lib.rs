@@ -1,4 +1,5 @@
 mod events;
+mod herdr;
 mod sumvox;
 mod tray;
 mod brain;
@@ -84,10 +85,11 @@ async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), St
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file, process_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening])
+        .invoke_handler(tauri::generate_handler![read_file, process_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, herdr::get_roster])
         .setup(|app| {
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());
+            herdr::spawn_watcher(app.handle().clone());
 
             // ponytail: macOS only — Linux hotkey = Hyprland bind (M4), Wayland can't self-register
             #[cfg(target_os = "macos")]
