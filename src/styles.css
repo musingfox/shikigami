@@ -55,36 +55,71 @@ body {
 #toast.show {
   opacity: 1;
 }
-/* roster strip: one status dot per observed agent, just above the orb */
+/* roster strip: one status dot per observed agent, just above the orb.
+   Each button is a fixed 20px hit area; the visible dot is ::before so the
+   hover label (::after) doesn't inherit the grow transform. */
 #roster-strip {
   position: absolute;
-  top: calc(50% - 74px);
+  top: calc(50% - 75px);
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  gap: 4px;
+  gap: 2px;
   z-index: 900; /* under menu (1000); transient toast overlap is fine */
 }
 
 .roster-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  position: relative;
+  width: 20px;
+  height: 20px;
   border: none;
   padding: 0;
+  background: transparent;
   cursor: pointer;
-  background: #6b7280; /* unknown */
 }
-.roster-dot[data-status="idle"] { background: #9ca3af; }
-.roster-dot[data-status="done"] { background: #60a5fa; }
-.roster-dot[data-status="working"] {
+
+.roster-dot::before {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  background: #6b7280; /* unknown */
+  transition: transform 120ms ease;
+}
+.roster-dot:hover::before { transform: scale(1.5); }
+.roster-dot[data-status="idle"]::before { background: #9ca3af; }
+.roster-dot[data-status="done"]::before { background: #60a5fa; }
+.roster-dot[data-status="working"]::before {
   background: #34d399;
   box-shadow: 0 0 6px rgba(52, 211, 153, 0.8);
 }
-.roster-dot[data-status="blocked"] {
+.roster-dot[data-status="blocked"]::before {
   background: #f59e0b;
   box-shadow: 0 0 6px rgba(245, 158, 11, 0.8);
 }
+
+/* hover label: "name · status" pill under the dot */
+.roster-dot::after {
+  content: attr(data-name) " · " attr(data-status);
+  position: absolute;
+  top: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(16, 24, 32, 0.9);
+  color: #cdd6e0;
+  font: 10px/1.3 ui-monospace, "SF Mono", Menlo, monospace;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+  z-index: 10;
+}
+.roster-dot:hover::after { opacity: 1; }
 
 #radial-menu {
   position: fixed;

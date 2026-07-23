@@ -79,7 +79,7 @@ function renderStrip() {
     const dot = document.createElement("button");
     dot.className = "roster-dot";
     dot.dataset.status = a.status;
-    dot.title = a.name;
+    dot.dataset.name = a.name; // hover label reads this via attr()
     dot.onclick = () => toast(`${a.name}: ${a.status}`);
     el.appendChild(dot);
   }
