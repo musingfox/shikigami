@@ -6,7 +6,7 @@ import {
   noteActivity,
   attribute,
   arcPositions,
-  clampLabelX,
+  magnifyScale,
   ATTRIBUTION_WINDOW_MS,
   testStripRenders,
   __setTestModeForTest,
@@ -90,8 +90,10 @@ test("T7: arcPositions n=1 正上方；n=4 左右對稱、全在圓心上方", (
   expect(arcPositions(0, c)).toEqual([]);
 });
 
-test("T8: clampLabelX 置中、貼左緣、貼右緣", () => {
-  expect(clampLabelX(75, 50, 150)).toBe(50); // fits centered
-  expect(clampLabelX(10, 100, 150)).toBe(4); // clamps to left margin
-  expect(clampLabelX(140, 100, 150)).toBe(46); // clamps to right margin
+test("T8: magnifyScale 貼齊游標最大、影響圈外為 1、單調遞減", () => {
+  expect(magnifyScale(0)).toBeCloseTo(1.9, 5); // on the cursor: max
+  expect(magnifyScale(48)).toBe(1); // at influence edge
+  expect(magnifyScale(100)).toBe(1); // far away
+  expect(magnifyScale(12)).toBeGreaterThan(magnifyScale(24));
+  expect(magnifyScale(24)).toBeGreaterThan(magnifyScale(40));
 });

@@ -80,6 +80,8 @@ body.menu-open #roster-label {
   background: transparent;
   cursor: pointer;
   pointer-events: auto;
+  /* dock magnification: roster.ts sets scale() from cursor distance */
+  transition: transform 80ms ease-out;
 }
 
 /* breathe like the orb: a slow, soft swell */
@@ -94,13 +96,9 @@ body.menu-open #roster-label {
   inset: 4px;
   border-radius: 50%;
   background: #6b7280; /* unknown */
+  /* breathing lives on ::before, dock scale on the button — they compose */
   animation: roster-breathe 3.2s ease-in-out infinite;
   animation-delay: inherit;
-}
-.roster-dot:hover::before {
-  animation: none;
-  transform: scale(1.6);
-  transition: transform 120ms ease;
 }
 .roster-dot[data-status="idle"]::before { background: #9ca3af; }
 .roster-dot[data-status="done"]::before { background: #60a5fa; }
@@ -113,10 +111,16 @@ body.menu-open #roster-label {
   box-shadow: 0 0 6px rgba(245, 158, 11, 0.8);
 }
 
-/* hover label: "name · status" pill, positioned + clamped by roster.ts so
-   long names never clip at the window edge */
+/* hover label: fixed caption slot under the orb — appearing never disturbs
+   the bubbles, and long names ellipsize inside the window */
 #roster-label {
   position: fixed;
+  top: calc(50% + 62px);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 12px);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   padding: 2px 6px;
   border-radius: 6px;

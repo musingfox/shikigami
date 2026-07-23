@@ -85,9 +85,10 @@ export function arcPositions(
   return out;
 }
 
-// Clamp the label's left edge so its full width stays inside the window.
-export function clampLabelX(centerX: number, width: number, winW: number, margin = 4): number {
-  return Math.min(winW - margin - width, Math.max(margin, centerX - width / 2));
+// macOS-dock magnification: scale by cursor distance, cosine falloff.
+export function magnifyScale(dist: number, influence = 48, maxScale = 1.9): number {
+  if (dist >= influence) return 1;
+  return 1 + ((maxScale - 1) * (Math.cos((dist / influence) * Math.PI) + 1)) / 2;
 }
 
 const DOT = 20; // button hit size
@@ -102,18 +103,29 @@ function labelEl(): HTMLDivElement {
   return el;
 }
 
-function showLabel(a: AgentEntry, at: { x: number; y: number }) {
+// Fixed caption slot under the orb (CSS-positioned) — showing it never moves
+// the bubbles, and long names just ellipsize inside the window.
+function showLabel(a: AgentEntry) {
   const el = labelEl();
   el.textContent = `${a.name} · ${a.status}`;
-  const winW = document.documentElement.clientWidth || 150;
-  // place first so offsetWidth is measurable, then clamp into the window
-  el.style.top = `${at.y + DOT / 2 + 4}px`;
-  el.style.left = `${clampLabelX(at.x, el.offsetWidth, winW)}px`;
   el.classList.add("show");
 }
 
 function hideLabel() {
   document.getElementById("roster-label")?.classList.remove("show");
+}
+
+// live geometry for the dock effect (rebuilt on every render)
+let dotEls: HTMLButtonElement[] = [];
+let dotPos: { x: number; y: number }[] = [];
+
+function applyMagnify(mx: number, my: number) {
+  dotEls.forEach((dot, i) => {
+    const p = dotPos[i];
+    if (!p || !dot.isConnected) return;
+    const s = magnifyScale(Math.hypot(mx - p.x, my - p.y));
+    dot.style.transform = s === 1 ? "" : `scale(${s.toFixed(3)})`;
+  });
 }
 
 function renderStrip() {
@@ -130,9 +142,10 @@ function renderStrip() {
   }
   el.innerHTML = "";
   hideLabel();
-  const pos = arcPositions(roster.length, currentCenter());
+  dotEls = [];
+  dotPos = arcPositions(roster.length, currentCenter());
   roster.forEach((a, i) => {
-    const p = pos[i];
+    const p = dotPos[i];
     const dot = document.createElement("button");
     dot.className = "roster-dot";
     dot.dataset.status = a.status;
@@ -140,10 +153,11 @@ function renderStrip() {
     dot.style.top = `${p.y - DOT / 2}px`;
     // stagger the breathing so the flock feels alive, not metronomic
     dot.style.animationDelay = `${i * 0.45}s`;
-    dot.onmouseenter = () => showLabel(a, p);
+    dot.onmouseenter = () => showLabel(a);
     dot.onmouseleave = hideLabel;
     dot.onclick = () => toast(`${a.name}: ${a.status}`);
     el!.appendChild(dot);
+    dotEls.push(dot);
   });
 }
 
@@ -157,4 +171,6 @@ export function initRoster() {
     .catch(() => {});
   // arc geometry depends on the window center — re-render on grow/shrink
   window.addEventListener("resize", renderStrip);
+  // dock magnification tracks the cursor everywhere (5 dots, cheap)
+  document.addEventListener("mousemove", (e) => applyMagnify(e.clientX, e.clientY));
 }
