@@ -102,6 +102,7 @@ pub fn run() {
             sumvox::spawn_watcher(app.handle().clone());
             herdr::spawn_watcher(app.handle().clone());
             cchooks::spawn_watcher(app.handle().clone());
+            std::thread::spawn(stt::warmup); // model load off the first utterance
 
             // ponytail: macOS only — Linux hotkey = Hyprland bind (M4), Wayland can't self-register
             #[cfg(target_os = "macos")]

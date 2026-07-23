@@ -25,6 +25,17 @@ pub fn model_path() -> PathBuf {
 
 static WHISPER_CTX: OnceLock<WhisperContext> = OnceLock::new();
 
+/// Load the model now instead of on the first utterance — called from a
+/// background thread at app startup so the first STT doesn't pay ~seconds
+/// of model load.
+pub fn warmup() {
+    let t0 = std::time::Instant::now();
+    match get_ctx() {
+        Ok(_) => eprintln!("[stt] model warmed in {:.1}s", t0.elapsed().as_secs_f32()),
+        Err(e) => eprintln!("[stt] warmup skipped: {e}"),
+    }
+}
+
 fn get_ctx() -> Result<&'static WhisperContext, String> {
     if let Some(c) = WHISPER_CTX.get() {
         return Ok(c);
@@ -85,9 +96,15 @@ pub fn transcribe(pcm: &[f32]) -> Result<String, String> {
     params.set_print_special(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+    let t0 = std::time::Instant::now();
     state
         .full(params, samples)
         .map_err(|e| format!("whisper full: {}", e))?;
+    eprintln!(
+        "[stt] {:.1}s audio transcribed in {:.1}s",
+        samples.len() as f32 / 16000.0,
+        t0.elapsed().as_secs_f32()
+    );
     let num = state.full_n_segments();
     let mut text = String::new();
     for i in 0..num {

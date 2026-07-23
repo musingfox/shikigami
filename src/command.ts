@@ -45,6 +45,7 @@ export async function onUtterance(pcm: number[]): Promise<boolean> {
   const t = target;
   target = null; // one-shot: next utterance is ordinary Q&A again
   try {
+    if (!testMode) toast("辨識中…"); // STT takes a beat — show we heard them
     const text = String(await invokeImpl("transcribe_utterance", { pcm })).trim();
     if (!text) {
       if (!testMode) toast("⚠ 沒聽到內容");
