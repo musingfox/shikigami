@@ -9,7 +9,11 @@ import {
   __resetForTest,
   __getTargetForTest,
 } from "../src/command";
-import { __setTestModeForTest as micTestMode, resetTestRecords as micReset } from "../src/mic";
+import {
+  __setTestModeForTest as micTestMode,
+  __setListeningForTest,
+  resetTestRecords as micReset,
+} from "../src/mic";
 import type { AgentEntry } from "../src/events";
 
 const agent: AgentEntry = {
@@ -25,6 +29,7 @@ beforeEach(() => {
   __setTestModeForTest(true);
   __resetForTest();
   micReset(); // sets mic testMode so toggleTalk takes the local path
+  __setListeningForTest(false); // a leftover take would flip 🎙 into "finish"
 });
 
 test("T1: 沒有 target 時 onUtterance 放行（回 false，不攔截 Q&A）", async () => {

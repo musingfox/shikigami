@@ -6,7 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentEntry } from "./events";
-import { setUtteranceInterceptor, toggleTalk } from "./mic";
+import { isListening, setUtteranceInterceptor, toggleTalk } from "./mic";
 import { toast } from "./toast";
 import { acquireLarge, releaseLarge } from "./window-frame";
 
@@ -33,8 +33,14 @@ export function __resetForTest() {
 export function __getTargetForTest() { return target; }
 
 export async function startTargetedTalk(a: AgentEntry) {
+  if (isListening()) {
+    // a capture is already running — this click means "finish it"; the
+    // flush routes through onUtterance and pops the confirm
+    await toggleTalk();
+    return;
+  }
   target = { pane: a.pane, name: a.name };
-  if (!testMode) toast(`對 ${a.name} 說話…`);
+  showStage(`🔴 對 ${a.name} 說話中…`, "■ 結束", () => { toggleTalk(); });
   await toggleTalk();
 }
 
@@ -45,17 +51,46 @@ export async function onUtterance(pcm: number[]): Promise<boolean> {
   const t = target;
   target = null; // one-shot: next utterance is ordinary Q&A again
   try {
-    if (!testMode) toast("辨識中…"); // STT takes a beat — show we heard them
+    showStage("辨識中…"); // STT takes a beat — show we heard them
     const text = String(await invokeImpl("transcribe_utterance", { pcm })).trim();
     if (!text) {
+      hideConfirm();
       if (!testMode) toast("⚠ 沒聽到內容");
       return true;
     }
     showConfirm(t, text);
   } catch (e) {
+    hideConfirm();
     if (!testMode) toast("⚠ " + String(e));
   }
   return true;
+}
+
+// One visible state at every step of a targeted take: the confirm bubble
+// doubles as the stage indicator (錄音中 → 辨識中 → confirm), so a running
+// capture always has an on-screen stop affordance.
+function showStage(text: string, buttonText?: string, onButton?: () => void) {
+  if (testMode) return;
+  const el = confirmEl();
+  el.innerHTML = "";
+  const span = document.createElement("span");
+  span.textContent = text;
+  el.appendChild(span);
+  if (buttonText && onButton) {
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const btn = document.createElement("button");
+    btn.textContent = buttonText;
+    btn.onclick = onButton;
+    actions.appendChild(btn);
+    el.appendChild(actions);
+  }
+  if (!confirmShown) {
+    confirmShown = true;
+    acquireLarge().then(() => el.classList.add("show"));
+  } else {
+    el.classList.add("show");
+  }
 }
 
 function confirmEl(): HTMLDivElement {
@@ -113,6 +148,10 @@ function inject(t: Target, text: string) {
 }
 
 function hideConfirm() {
+  if (testMode || typeof document === "undefined") {
+    confirmShown = false;
+    return;
+  }
   document.getElementById("confirm-bar")?.classList.remove("show");
   if (confirmShown) {
     confirmShown = false;
