@@ -44,6 +44,25 @@ fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+// Orb double-click talk: flip the shared listening state; the VOICE_LISTENING
+// event then drives capture start/stop — the exact same path as the PTT hotkey.
+#[tauri::command]
+fn toggle_listening(app: tauri::AppHandle) -> bool {
+    use std::sync::atomic::Ordering;
+    let new_state = !voice::LISTENING.fetch_xor(true, Ordering::SeqCst);
+    let _ = app.emit(VOICE_LISTENING, new_state);
+    new_state
+}
+
+// Mic-failure rollback: frontend resets listening here too, otherwise a stale
+// LISTENING=true makes shortcut_action swallow the next PTT press-release cycle.
+#[tauri::command]
+fn set_listening(app: tauri::AppHandle, on: bool) {
+    use std::sync::atomic::Ordering;
+    voice::LISTENING.store(on, Ordering::SeqCst);
+    let _ = app.emit(VOICE_LISTENING, on);
+}
+
 // Full voice loop: pcm f32le@16k → whisper STT → transcript event → brain → speak-back.
 // Errors carry a stage label ("stt:"/"brain:"/"speak:") for the frontend toast.
 // ponytail: pcm crosses IPC as a JSON byte array; switch to InvokeBody::Raw if latency matters
@@ -65,7 +84,7 @@ async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), St
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file, process_utterance, toggle_mute, get_muted, open_config, quit_app])
+        .invoke_handler(tauri::generate_handler![read_file, process_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening])
         .setup(|app| {
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());
@@ -80,8 +99,6 @@ pub fn run() {
                     Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyS);
                 let ptt_shortcut =
                     Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyM);
-                static LISTENING: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, shortcut, event| {
@@ -90,15 +107,15 @@ pub fn run() {
                             let action = voice::shortcut_action(
                                 shortcut == &ptt_shortcut,
                                 event.state(),
-                                LISTENING.load(Ordering::SeqCst),
+                                voice::LISTENING.load(Ordering::SeqCst),
                             );
                             match action {
                                 VoiceShortcut::StartListening => {
-                                    LISTENING.store(true, Ordering::SeqCst);
+                                    voice::LISTENING.store(true, Ordering::SeqCst);
                                     let _ = app.emit(VOICE_LISTENING, true);
                                 }
                                 VoiceShortcut::StopListening => {
-                                    LISTENING.store(false, Ordering::SeqCst);
+                                    voice::LISTENING.store(false, Ordering::SeqCst);
                                     let _ = app.emit(VOICE_LISTENING, false);
                                 }
                                 VoiceShortcut::ToggleWindow => {

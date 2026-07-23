@@ -13,6 +13,12 @@ pub async fn reply_to_transcript(transcript: &str) -> Result<String, String> {
 
 use tauri_plugin_global_shortcut::ShortcutState;
 
+/// Single source of truth for listening state. Written by the PTT hotkey
+/// handler AND the frontend (toggle_listening / set_listening commands) so
+/// the two entry points can never desync; every change is broadcast as
+/// VOICE_LISTENING and the frontend only mirrors it.
+pub static LISTENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum VoiceShortcut {
     StartListening,

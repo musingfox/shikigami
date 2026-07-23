@@ -96,8 +96,17 @@ export function isListening() {
 }
 
 // Double-click the orb to talk: first call starts capture, second stops+sends.
-// Shares `listening` with the PTT hotkey so both stay consistent.
+// Rust owns the listening state (voice::LISTENING) — we just flip it there and
+// let the VOICE_LISTENING event drive capture, the exact same path as the PTT
+// hotkey. Local flip remains as the no-Tauri (test / browser preview) fallback.
 export async function toggleTalk(): Promise<boolean> {
+  if (!testMode) {
+    try {
+      return !!(await invoke("toggle_listening"));
+    } catch {
+      // browser preview: no Tauri runtime — fall through to the local flip
+    }
+  }
   if (!listening) {
     listening = true;
     recordSpeak(true);
@@ -196,6 +205,8 @@ async function startCaptureOrRollback() {
   if (!testMode && !mediaStream) {
     listening = false;
     recordSpeak(false);
+    // reset the Rust side too, or the next PTT press-release cycle is swallowed
+    invoke("set_listening", { on: false }).catch(() => {});
   }
 }
 
