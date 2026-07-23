@@ -6,7 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentEntry } from "./events";
-import { isListening, setUtteranceInterceptor, toggleTalk } from "./mic";
+import { isListening, setCaptureReadyListener, setUtteranceInterceptor, toggleTalk } from "./mic";
 import { toast } from "./toast";
 import { acquireLarge, releaseLarge } from "./window-frame";
 
@@ -40,7 +40,10 @@ export async function startTargetedTalk(a: AgentEntry) {
     return;
   }
   target = { pane: a.pane, name: a.name };
-  showStage(`🔴 對 ${a.name} 說話中…`, "■ 結束", () => { toggleTalk(); });
+  // words spoken before the mic actually streams are LOST (this clipped
+  // leading Chinese and left English-only transcripts) — don't show the red
+  // dot until capture-ready fires
+  showStage("🎙 麥克風準備中…");
   await toggleTalk();
 }
 
@@ -161,6 +164,11 @@ function hideConfirm() {
 
 export function initCommand() {
   setUtteranceInterceptor(onUtterance);
+  setCaptureReadyListener((ready) => {
+    if (ready && target) {
+      showStage(`🔴 對 ${target.name} 說話中…`, "■ 結束", () => { toggleTalk(); });
+    }
+  });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") hideConfirm();
   });

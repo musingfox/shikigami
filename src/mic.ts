@@ -103,6 +103,14 @@ export function setUtteranceInterceptor(fn: ((pcm: number[]) => Promise<boolean>
   utteranceInterceptor = fn;
 }
 
+// Fired when audio frames actually start flowing — mic spin-up takes a few
+// hundred ms after toggleTalk, and words spoken before that are lost. UI
+// should not invite the user to speak until this fires.
+let captureReadyListener: ((ready: boolean) => void) | null = null;
+export function setCaptureReadyListener(fn: ((ready: boolean) => void) | null) {
+  captureReadyListener = fn;
+}
+
 // Double-click the orb to talk: first call starts capture, second stops+sends.
 // Rust owns the listening state (voice::LISTENING) — we just flip it there and
 // let the VOICE_LISTENING event drive capture, the exact same path as the PTT
@@ -170,6 +178,7 @@ async function startCapture() {
     };
     source.connect(processor);
     processor.connect(audioCtx.destination);
+    captureReadyListener?.(true);
   } catch (err) {
     surfaceError("mic: " + String(err));
   }
