@@ -41,3 +41,12 @@ test("release below zero clamps at 0 and stays small", async () => {
   expect(__refsForTest()).toBe(0);
   expect(__isLargeForTest()).toBe(false);
 });
+
+test("onFrameChange fires after the flag flips (grow and shrink)", async () => {
+  const { onFrameChange, currentCenter: cc } = await import("../src/window-frame");
+  const seen: number[] = [];
+  onFrameChange(() => seen.push(cc().x)); // record the center AT notify time
+  await acquireLarge();
+  await releaseLarge();
+  expect(seen).toEqual([160, 88]); // large center, then small — never stale
+});

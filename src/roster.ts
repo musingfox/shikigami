@@ -19,7 +19,7 @@ import {
 } from "./events";
 import { startTargetedTalk } from "./command";
 import { toast } from "./toast";
-import { currentCenter } from "./window-frame";
+import { currentCenter, onFrameChange } from "./window-frame";
 
 export const ATTRIBUTION_WINDOW_MS = 30_000;
 
@@ -214,8 +214,9 @@ export function initRoster() {
   invoke<AgentEntry[]>("get_roster")
     .then((r) => setRoster(r ?? []))
     .catch(() => {});
-  // arc geometry depends on the window center — re-render on grow/shrink
-  window.addEventListener("resize", renderStrip);
+  // arc geometry depends on the window center — re-arc AFTER the frame flag
+  // flips (the raw resize event races it and renders around the old center)
+  onFrameChange(renderStrip);
   // dock magnification tracks the cursor everywhere (5 dots, cheap)
   document.addEventListener("mousemove", (e) => applyMagnify(e.clientX, e.clientY));
   // click anywhere outside the bubbles/caption clears the selection

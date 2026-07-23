@@ -15,6 +15,14 @@ let large = false;
 let refs = 0;
 let chain: Promise<void> = Promise.resolve();
 
+// Notified AFTER the size flag flips — the DOM resize event races the flag
+// (it fires mid-applySize while currentCenter still reports the old center),
+// so geometry consumers subscribe here instead.
+const frameListeners: (() => void)[] = [];
+export function onFrameChange(fn: () => void) {
+  frameListeners.push(fn);
+}
+
 // Window center in CSS (logical) px — the coordinate space of clientX/clientY.
 export function currentCenter(): { x: number; y: number } {
   return large ? { x: LARGE.cx, y: LARGE.cy } : { x: SMALL.cx, y: SMALL.cy };
@@ -46,6 +54,7 @@ async function applySize(toLarge: boolean) {
     // browser preview / no Tauri runtime: still flip so geometry uses the right center
   }
   large = toLarge;
+  frameListeners.forEach((f) => f());
 }
 
 export function acquireLarge(): Promise<void> {
