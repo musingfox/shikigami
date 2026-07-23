@@ -7,9 +7,7 @@
 // ponytail: hand-rolled DOM, no framework; test hooks mirror mic.ts exactly.
 
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-import { VOICE_MUTED } from "./events";
 import { toast } from "./toast";
 import { acquireLarge, releaseLarge, currentCenter, LARGE_W, LARGE_H } from "./window-frame";
 
@@ -232,9 +230,8 @@ export function onMutedEvent(m: boolean) {
 }
 
 export function initMenu() {
-  // context menu routing in main.ts
-  // listen for mute sync
-  listen<boolean>(VOICE_MUTED, (e) => onMutedEvent(e.payload));
+  // context menu routing + VOICE_MUTED subscription live in main.ts (composition
+  // root) — subscribing here too made every mute event re-render the menu twice
   // MenuDismiss triggers: Escape and left-click outside menu items
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") dismissMenu("escape");
