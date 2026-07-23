@@ -20,6 +20,8 @@ export type AgentEntry = {
   name: string;
   pane: string; // injection target for channel ② (R2)
   status: string; // idle | working | blocked | done | unknown
+  title: string; // what the agent is doing right now ("" if unknown)
+  cwd: string; // working directory ("" if unknown)
 };
 
 export type AgentStatusChange = {

@@ -31,6 +31,7 @@ export function __setTestModeForTest(v: boolean) { testMode = v; }
 export function __resetForTest() {
   roster = [];
   lastActivity = null;
+  selectedId = null;
   testStripRenders.length = 0;
 }
 
@@ -94,6 +95,14 @@ export function magnifyScale(dist: number, influence = 48, maxScale = 1.6): numb
 
 const DOT = 20; // button hit size
 
+export function labelText(a: AgentEntry): string {
+  const base = `${a.name} · ${a.status}`;
+  return a.title ? `${base} — ${a.title}` : base;
+}
+
+// Click-selected bubble (sticky caption + action buttons); null = hover mode.
+let selectedId: string | null = null;
+
 function labelEl(): HTMLDivElement {
   let el = document.getElementById("roster-label") as HTMLDivElement | null;
   if (!el) {
@@ -105,15 +114,40 @@ function labelEl(): HTMLDivElement {
 }
 
 // Fixed caption slot under the orb (CSS-positioned) — showing it never moves
-// the bubbles, and long names just ellipsize inside the window.
-function showLabel(a: AgentEntry) {
+// the bubbles, and long names just ellipsize inside the window. Selecting a
+// bubble makes it sticky and appends the action buttons (R1.5).
+function showLabel(a: AgentEntry, sticky = false) {
   const el = labelEl();
-  el.textContent = `${a.name} · ${a.status}`;
+  el.innerHTML = "";
+  const text = document.createElement("span");
+  text.textContent = labelText(a);
+  el.appendChild(text);
+  if (sticky) {
+    const jump = document.createElement("button");
+    jump.textContent = "↗";
+    jump.title = "跳過去";
+    jump.onclick = () => {
+      invoke("focus_agent", { pane: a.pane }).catch((e) => toast("⚠ " + String(e)));
+      deselect();
+    };
+    const talk = document.createElement("button");
+    talk.textContent = "🎙";
+    talk.title = "對它說話";
+    talk.onclick = () => toast("對它說話：R2 接手中"); // ponytail: placeholder until R2 targeted talk
+    el.append(jump, talk);
+  }
+  el.classList.toggle("selected", sticky);
   el.classList.add("show");
 }
 
 function hideLabel() {
-  document.getElementById("roster-label")?.classList.remove("show");
+  const el = document.getElementById("roster-label");
+  el?.classList.remove("show", "selected");
+}
+
+function deselect() {
+  selectedId = null;
+  hideLabel();
 }
 
 // live geometry for the dock effect (rebuilt on every render)
@@ -142,7 +176,6 @@ function renderStrip() {
     document.body.appendChild(el);
   }
   el.innerHTML = "";
-  hideLabel();
   dotEls = [];
   dotPos = arcPositions(roster.length, currentCenter());
   roster.forEach((a, i) => {
@@ -154,12 +187,19 @@ function renderStrip() {
     dot.style.top = `${p.y - DOT / 2}px`;
     // stagger the breathing so the flock feels alive, not metronomic
     dot.style.animationDelay = `${i * 0.45}s`;
-    dot.onmouseenter = () => showLabel(a);
-    dot.onmouseleave = hideLabel;
-    dot.onclick = () => toast(`${a.name}: ${a.status}`);
+    dot.onmouseenter = () => { if (!selectedId) showLabel(a); };
+    dot.onmouseleave = () => { if (!selectedId) hideLabel(); };
+    dot.onclick = () => {
+      if (selectedId === a.id) deselect();
+      else { selectedId = a.id; showLabel(a, true); }
+    };
     el!.appendChild(dot);
     dotEls.push(dot);
   });
+  // selection survives re-renders (status polls) as long as the agent exists
+  const sel = roster.find((a) => a.id === selectedId);
+  if (sel) showLabel(sel, true);
+  else deselect();
 }
 
 export function initRoster() {
@@ -174,4 +214,11 @@ export function initRoster() {
   window.addEventListener("resize", renderStrip);
   // dock magnification tracks the cursor everywhere (5 dots, cheap)
   document.addEventListener("mousemove", (e) => applyMagnify(e.clientX, e.clientY));
+  // click anywhere outside the bubbles/caption clears the selection
+  document.addEventListener("mousedown", (e) => {
+    if (!selectedId) return;
+    const t = e.target as Element | null;
+    if (t && (t.closest(".roster-dot") || t.closest("#roster-label"))) return;
+    deselect();
+  });
 }

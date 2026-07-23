@@ -7,6 +7,7 @@ import {
   attribute,
   arcPositions,
   magnifyScale,
+  labelText,
   ATTRIBUTION_WINDOW_MS,
   testStripRenders,
   __setTestModeForTest,
@@ -14,11 +15,13 @@ import {
 } from "../src/roster";
 import type { AgentEntry, Activity } from "../src/events";
 
-const entry = (id: string, name: string, pane: string, status: string): AgentEntry => ({
+const entry = (id: string, name: string, pane: string, status: string, title = ""): AgentEntry => ({
   id,
   name,
   pane,
   status,
+  title,
+  cwd: "",
 });
 
 const activity = (pane: string, session = "sess-1234-abcd"): Activity => ({
@@ -88,6 +91,13 @@ test("T7: arcPositions n=1 正上方；n=4 左右對稱、全在圓心上方", (
   expect(four[0].x).toBeLessThan(four[1].x);
   for (const p of four) expect(p.y).toBeLessThan(75);
   expect(arcPositions(0, c)).toEqual([]);
+});
+
+test("T9: labelText 有 title 附加、無 title 只有 name·status", () => {
+  expect(labelText(entry("a", "cyris", "p", "working", "接上 Cloudflare"))).toBe(
+    "cyris · working — 接上 Cloudflare",
+  );
+  expect(labelText(entry("a", "cyris", "p", "idle"))).toBe("cyris · idle");
 });
 
 test("T8: magnifyScale 貼齊游標最大、影響圈外為 1、單調遞減", () => {

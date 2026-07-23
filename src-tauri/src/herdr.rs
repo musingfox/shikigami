@@ -36,7 +36,7 @@ fn socket_path() -> std::path::PathBuf {
 
 /// One request/response round-trip on a fresh connection (the server closes
 /// after each response, so there is nothing to keep alive).
-fn call(id: u64, method: &str) -> Result<Value, String> {
+fn call(id: u64, method: &str, params: Value) -> Result<Value, String> {
     let stream =
         UnixStream::connect(socket_path()).map_err(|e| format!("herdr connect: {e}"))?;
     stream
@@ -46,7 +46,7 @@ fn call(id: u64, method: &str) -> Result<Value, String> {
     let req = serde_json::json!({
         "id": format!("shikigami-{id}"),
         "method": method,
-        "params": {},
+        "params": params,
     });
     let mut line = req.to_string();
     line.push('\n');
@@ -85,17 +85,30 @@ fn agent_entry(v: &Value) -> Option<AgentEntry> {
         .unwrap_or("unknown")
         .to_string();
     let str_field = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let cwd = str_field("cwd").unwrap_or_default();
+    let title = str_field("terminal_title_stripped").unwrap_or_default();
     let name = str_field("name")
         .or_else(|| {
-            str_field("cwd").and_then(|c| {
-                std::path::Path::new(&c)
-                    .file_name()
-                    .map(|b| b.to_string_lossy().into_owned())
-            })
+            std::path::Path::new(&cwd)
+                .file_name()
+                .map(|b| b.to_string_lossy().into_owned())
         })
         .or_else(|| str_field("agent"))
         .unwrap_or_else(|| id.clone());
-    Some(AgentEntry { id, name, pane, status })
+    Some(AgentEntry { id, name, pane, status, title, cwd })
+}
+
+/// Jump to an agent's pane: herdr switches workspace/pane focus, then we
+/// bring the terminal app forward.
+/// ponytail: terminal app hardcoded to Ghostty; configurable when needed.
+#[tauri::command]
+pub fn focus_agent(pane: String) -> Result<(), String> {
+    call(0, "agent.focus", serde_json::json!({ "target": pane }))?;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").args(["-a", "Ghostty"]).spawn();
+    }
+    Ok(())
 }
 
 /// Diff old→new: whether anything changed (membership, name, pane, status)
@@ -143,7 +156,7 @@ pub fn spawn_watcher(app: tauri::AppHandle) {
 }
 
 fn poll_once(app: &tauri::AppHandle, seq: u64, force: bool) -> Result<(), String> {
-    let result = call(seq, "agent.list")?;
+    let result = call(seq, "agent.list", serde_json::json!({}))?;
     let roster = parse_agent_list(&result);
     let (changed, status_changes) = {
         let last = ROSTER.lock().map_err(|e| e.to_string())?;
@@ -167,11 +180,17 @@ mod tests {
     use crate::events::AgentEntry;
 
     fn entry(id: &str, name: &str, pane: &str, status: &str) -> AgentEntry {
+        entry_full(id, name, pane, status, "", "")
+    }
+
+    fn entry_full(id: &str, name: &str, pane: &str, status: &str, title: &str, cwd: &str) -> AgentEntry {
         AgentEntry {
             id: id.into(),
             name: name.into(),
             pane: pane.into(),
             status: status.into(),
+            title: title.into(),
+            cwd: cwd.into(),
         }
     }
 
@@ -190,7 +209,8 @@ mod tests {
                     "terminal_id": "term_b", "pane_id": "wT:p1",
                     "workspace_id": "wT", "tab_id": "wT:t1", "focused": false,
                     "revision": 12, "agent_status": "working", "agent": "claude",
-                    "name": "builder", "cwd": "/Users/x/workspace/shikigami"
+                    "name": "builder", "cwd": "/Users/x/workspace/shikigami",
+                    "terminal_title_stripped": "設計 1:1:N 架構"
                 }
             ]
         })
@@ -202,8 +222,10 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                entry("term_a", "cyris", "wD:p1", "blocked"), // name null → cwd basename
-                entry("term_b", "builder", "wT:p1", "working"), // declared name wins
+                // name null → cwd basename; no title in source → ""
+                entry_full("term_a", "cyris", "wD:p1", "blocked", "", "/Users/x/workspace/cyris"),
+                // declared name wins; title from terminal_title_stripped
+                entry_full("term_b", "builder", "wT:p1", "working", "設計 1:1:N 架構", "/Users/x/workspace/shikigami"),
             ]
         );
     }
@@ -260,8 +282,8 @@ mod tests {
     #[test]
     #[ignore]
     fn live_herdr_agent_list_round_trip() {
-        call(0, "ping").expect("ping");
-        let result = call(1, "agent.list").expect("agent.list");
+        call(0, "ping", serde_json::json!({})).expect("ping");
+        let result = call(1, "agent.list", serde_json::json!({})).expect("agent.list");
         let roster = parse_agent_list(&result);
         eprintln!("[live] roster = {roster:?}");
         for a in &roster {

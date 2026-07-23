@@ -112,16 +112,17 @@ body.menu-open #roster-label {
 }
 
 /* hover label: fixed caption slot under the orb — appearing never disturbs
-   the bubbles, and long names ellipsize inside the window */
+   the bubbles, and long names ellipsize inside the window. When a bubble is
+   click-selected it turns sticky and gains action buttons (↗ jump / 🎙 talk). */
 #roster-label {
   position: fixed;
   top: calc(50% + 62px);
   left: 50%;
   transform: translateX(-50%);
   max-width: calc(100% - 12px);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding: 2px 6px;
   border-radius: 6px;
   background: rgba(16, 24, 32, 0.9);
@@ -133,6 +134,25 @@ body.menu-open #roster-label {
   z-index: 950;
 }
 #roster-label.show { opacity: 1; }
+#roster-label.selected { pointer-events: auto; }
+
+#roster-label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#roster-label button {
+  flex: none;
+  border: 1px solid rgba(52, 211, 153, 0.5);
+  border-radius: 4px;
+  background: rgba(52, 211, 153, 0.12);
+  color: #d9f5ec;
+  font: 10px/1 ui-monospace, monospace;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+#roster-label button:hover { border-color: #22d3ee; color: #22d3ee; }
 
 #radial-menu {
   position: fixed;

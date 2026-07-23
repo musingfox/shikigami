@@ -41,6 +41,10 @@ pub struct AgentEntry {
     pub pane: String,
     /// idle | working | blocked | done | unknown
     pub status: String,
+    /// what the agent is doing right now (terminal title, "" if unknown)
+    pub title: String,
+    /// working directory ("" if unknown)
+    pub cwd: String,
 }
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
