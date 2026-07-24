@@ -29,6 +29,14 @@ pub fn get_roster() -> Vec<AgentEntry> {
     ROSTER.lock().map(|r| r.clone()).unwrap_or_default()
 }
 
+/// Drain the cached roster on a herdr disconnect and return its previous
+/// value. A dead socket means the last snapshot is stale, so we clear it and
+/// hand the caller the old contents — a non-empty return tells the caller an
+/// empty agent:roster must be emitted; an empty return means nothing changed.
+fn take_roster_on_disconnect() -> Vec<AgentEntry> {
+    ROSTER.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default()
+}
+
 fn socket_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     std::path::Path::new(&home).join(".config/herdr/herdr.sock")
@@ -154,6 +162,12 @@ pub fn spawn_watcher(app: tauri::AppHandle) {
                 Err(e) => {
                     if was_ok {
                         eprintln!("[herdr] {e}; retrying every {}s", RETRY.as_secs());
+                        // Socket died: the cached roster is now a dead snapshot.
+                        // Clear it and tell observers exactly once, on the
+                        // ok→error transition — not on every failed retry tick.
+                        if !take_roster_on_disconnect().is_empty() {
+                            let _ = app.emit(AGENT_ROSTER, Vec::<AgentEntry>::new());
+                        }
                     }
                     force = true;
                     was_ok = false;
@@ -284,6 +298,27 @@ mod tests {
         let (changed, transitions) = diff_roster(&old, &new);
         assert!(changed);
         assert!(transitions.is_empty()); // new arrivals surface via roster, not status
+    }
+
+    // Both tests mutate the shared ROSTER static; serialize them so cargo's
+    // parallel runner can't interleave their setup.
+    static ROSTER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn t7_take_on_disconnect_returns_prev_and_clears() {
+        let _g = ROSTER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *ROSTER.lock().unwrap() = vec![entry("t", "n", "p", "working")];
+        let prev = take_roster_on_disconnect();
+        assert_eq!(prev, vec![entry("t", "n", "p", "working")]);
+        assert!(get_roster().is_empty());
+    }
+
+    #[test]
+    fn t8_take_on_disconnect_when_empty_returns_empty() {
+        let _g = ROSTER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *ROSTER.lock().unwrap() = Vec::new();
+        let prev = take_roster_on_disconnect();
+        assert!(prev.is_empty());
     }
 
     /// Integration receipt against a live herdr — run manually:
