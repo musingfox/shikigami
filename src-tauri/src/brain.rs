@@ -10,6 +10,8 @@ use std::time::Duration;
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use crate::events::AgentEntry;
+
 const SYSTEM_PROMPT: &str = "你是式神，使用者的桌面語音助理。用使用者說話的語言簡潔回答，最多兩句，純文字、不用 Markdown，內容要適合直接朗讀。直接給答案，不要輸出思考過程、前言或自我說明。";
 const MAX_TOKENS: u32 = 300;
 
@@ -110,10 +112,51 @@ fn detect() -> Result<(Provider, String), String> {
     Ok((provider, key))
 }
 
-fn build_request(provider: Provider, transcript: &str) -> Value {
+/// Roster snapshot -> a model-readable Chinese text block. Empty roster states
+/// plainly that nothing is observed, so the model never invents an agent.
+fn render_roster(roster: &[AgentEntry]) -> String {
+    if roster.is_empty() {
+        return "目前沒有觀測到 agent。".to_string();
+    }
+    let mut out = String::from(
+        "目前觀測到的 agent（狀態詞彙：idle 閒置｜working 工作中｜blocked 受阻｜done 完成｜unknown 未知）：",
+    );
+    for e in roster {
+        out.push('\n');
+        out.push_str(&format!("- {}（{}）", e.name, e.status));
+        let mut detail = String::new();
+        if !e.title.trim().is_empty() {
+            detail.push_str(e.title.trim());
+        }
+        if !e.cwd.trim().is_empty() {
+            if !detail.is_empty() {
+                detail.push_str(" @ ");
+            }
+            detail.push_str(e.cwd.trim());
+        }
+        if !detail.is_empty() {
+            out.push('：');
+            out.push_str(&detail);
+        }
+    }
+    out
+}
+
+/// Base persona + a live roster block, sent in the system position so the
+/// model can name real working agents without the user transcript being touched.
+fn system_prompt(roster: &[AgentEntry]) -> String {
+    format!(
+        "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。",
+        SYSTEM_PROMPT,
+        render_roster(roster)
+    )
+}
+
+fn build_request(provider: Provider, transcript: &str, roster: &[AgentEntry]) -> Value {
+    let system = system_prompt(roster);
     match provider {
         Provider::Gemini => json!({
-            "system_instruction": { "parts": [{ "text": SYSTEM_PROMPT }] },
+            "system_instruction": { "parts": [{ "text": system }] },
             "contents": [{ "parts": [{ "text": transcript }] }],
             "generationConfig": {
                 "maxOutputTokens": MAX_TOKENS,
@@ -126,14 +169,14 @@ fn build_request(provider: Provider, transcript: &str) -> Value {
             "model": provider.model(),
             "max_completion_tokens": MAX_TOKENS,
             "messages": [
-                { "role": "system", "content": SYSTEM_PROMPT },
+                { "role": "system", "content": system },
                 { "role": "user", "content": transcript },
             ],
         }),
         Provider::Anthropic => json!({
             "model": provider.model(),
             "max_tokens": MAX_TOKENS,
-            "system": SYSTEM_PROMPT,
+            "system": system,
             "messages": [{ "role": "user", "content": transcript }],
         }),
     }
@@ -182,9 +225,9 @@ fn http_client() -> Client {
         .unwrap_or_else(|_| Client::new())
 }
 
-pub async fn ask(transcript: &str) -> Result<String, String> {
+pub async fn ask(transcript: &str, roster: &[AgentEntry]) -> Result<String, String> {
     let (provider, key) = detect()?;
-    let req = build_request(provider, transcript);
+    let req = build_request(provider, transcript, roster);
 
     let mut request = match provider {
         Provider::Gemini => http_client()
@@ -298,7 +341,7 @@ mod tests {
     // BrainReply contract tests (request/response per provider)
     #[test]
     fn t1_anthropic_request_shape() {
-        let v = build_request(Provider::Anthropic, "hi");
+        let v = build_request(Provider::Anthropic, "hi", &[]);
         assert_eq!(v["model"], "claude-haiku-4-5");
         assert_eq!(v["max_tokens"], 300);
         assert_eq!(v["messages"][0]["role"], "user");
@@ -308,7 +351,7 @@ mod tests {
 
     #[test]
     fn t1b_gemini_request_shape() {
-        let v = build_request(Provider::Gemini, "hi");
+        let v = build_request(Provider::Gemini, "hi", &[]);
         assert_eq!(v["contents"][0]["parts"][0]["text"], "hi");
         assert!(!v["system_instruction"]["parts"][0]["text"]
             .as_str()
@@ -320,12 +363,103 @@ mod tests {
 
     #[test]
     fn t1c_openai_request_shape() {
-        let v = build_request(Provider::OpenAi, "hi");
+        let v = build_request(Provider::OpenAi, "hi", &[]);
         assert_eq!(v["model"], "gpt-4.1-mini");
         assert_eq!(v["max_completion_tokens"], 300);
         assert_eq!(v["messages"][0]["role"], "system");
         assert_eq!(v["messages"][1]["role"], "user");
         assert_eq!(v["messages"][1]["content"], "hi");
+    }
+
+    // Roster test fixtures
+    fn agent(name: &str, status: &str, title: &str, cwd: &str) -> AgentEntry {
+        AgentEntry {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            pane: "%1".to_string(),
+            status: status.to_string(),
+            title: title.to_string(),
+            cwd: cwd.to_string(),
+        }
+    }
+
+    // RosterPromptBlock contract
+    #[test]
+    fn rp1_nonempty_row_carries_all_fields() {
+        let out = render_roster(&[agent("builder", "working", "設計 1:1:N 架構", "/x/shikigami")]);
+        assert!(out.contains("builder"));
+        assert!(out.contains("working"));
+        assert!(out.contains("設計 1:1:N 架構"));
+        assert!(out.contains("/x/shikigami"));
+    }
+
+    #[test]
+    fn rp2_empty_roster_declares_no_observation() {
+        let out = render_roster(&[]);
+        assert!(out.contains("沒有觀測到"));
+        assert!(!out.contains("- "));
+    }
+
+    #[test]
+    fn rp3_nonempty_includes_status_vocabulary() {
+        let out = render_roster(&[agent("x", "working", "", "")]);
+        assert!(out.contains("idle"));
+        assert!(out.contains("blocked"));
+    }
+
+    #[test]
+    fn rp4_empty_fields_omitted_no_dangling() {
+        let out = render_roster(&[agent("solo", "idle", "", "")]);
+        // the agent row carries only name+status, with no dangling detail
+        // separator ("：" / " @ ") left behind by the empty title and cwd.
+        let row = out.lines().find(|l| l.starts_with("- ")).unwrap();
+        assert_eq!(row, "- solo（idle）");
+        assert!(!out.contains(" @ "));
+    }
+
+    // BrainRequestCarriesRoster contract
+    #[test]
+    fn brc1_anthropic_system_carries_roster_user_clean() {
+        let v = build_request(
+            Provider::Anthropic,
+            "hi",
+            &[agent("builder", "working", "", "")],
+        );
+        let sys = v["system"].as_str().unwrap();
+        assert!(sys.contains("builder"));
+        assert!(sys.contains("working"));
+        assert_eq!(v["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn brc2_gemini_system_carries_roster_user_clean() {
+        let v = build_request(
+            Provider::Gemini,
+            "hi",
+            &[agent("builder", "working", "", "")],
+        );
+        let sys = v["system_instruction"]["parts"][0]["text"].as_str().unwrap();
+        assert!(sys.contains("builder"));
+        assert_eq!(v["contents"][0]["parts"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn brc3_openai_system_carries_roster_user_clean() {
+        let v = build_request(
+            Provider::OpenAi,
+            "hi",
+            &[agent("builder", "working", "", "")],
+        );
+        assert_eq!(v["messages"][0]["role"], "system");
+        let sys = v["messages"][0]["content"].as_str().unwrap();
+        assert!(sys.contains("builder"));
+        assert_eq!(v["messages"][1]["content"], "hi");
+    }
+
+    #[test]
+    fn brc4_empty_roster_says_no_observation() {
+        let v = build_request(Provider::Anthropic, "hi", &[]);
+        assert!(v["system"].as_str().unwrap().contains("沒有觀測到"));
     }
 
     #[test]

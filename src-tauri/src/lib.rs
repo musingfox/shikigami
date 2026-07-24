@@ -75,7 +75,7 @@ async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), St
         .map_err(|e| format!("stt: {e}"))?
         .map_err(|e| format!("stt: {e}"))?;
     let _ = app.emit(events::VOICE_TRANSCRIPT, transcript.clone());
-    let reply = voice::reply_to_transcript(&transcript)
+    let reply = voice::reply_to_transcript(&transcript, &herdr::get_roster())
         .await
         .map_err(|e| format!("brain: {e}"))?;
     sumvox::record_to(&sumvox::config_dir(), &reply).map_err(|e| format!("speak: {e}"))?;

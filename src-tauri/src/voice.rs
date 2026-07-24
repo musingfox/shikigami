@@ -3,12 +3,18 @@
 // ponytail: macOS cfg only for hotkeys; core logic cross.
 
 use crate::brain;
+use crate::events::AgentEntry;
 
-pub async fn reply_to_transcript(transcript: &str) -> Result<String, String> {
+/// Each voice reply is grounded in the roster snapshot passed by the caller at
+/// call time, so "誰在工作" names the agents actually working right now.
+pub async fn reply_to_transcript(
+    transcript: &str,
+    roster: &[AgentEntry],
+) -> Result<String, String> {
     if transcript.trim().is_empty() {
         return Err("empty transcript".to_string());
     }
-    brain::ask(transcript).await
+    brain::ask(transcript, roster).await
 }
 
 use tauri_plugin_global_shortcut::ShortcutState;
@@ -83,6 +89,23 @@ mod tests {
     #[test]
     fn t5_toggle_pressed_not_listening_toggles_window() {
         assert_eq!(shortcut_action(false, ShortcutState::Pressed, false), VoiceShortcut::ToggleWindow);
+    }
+
+    // VoiceReplyUsesLiveRoster contract
+    #[test]
+    fn vr1_empty_transcript_rejected_before_brain() {
+        let err = tauri::async_runtime::block_on(reply_to_transcript("", &[])).unwrap_err();
+        assert_eq!(err, "empty transcript");
+    }
+
+    // T2: live path (needs herdr + API key) — run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn vr2_live_roster_answer_nonempty() {
+        let roster = crate::herdr::get_roster();
+        let reply =
+            tauri::async_runtime::block_on(reply_to_transcript("現在誰在工作", &roster)).unwrap();
+        assert!(!reply.trim().is_empty());
     }
 }
 
