@@ -5,6 +5,7 @@
 // ponytail: requests/responses are serde_json::Value, no typed structs per vendor.
 
 use std::fs;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use reqwest::Client;
@@ -14,6 +15,32 @@ use crate::events::AgentEntry;
 
 const SYSTEM_PROMPT: &str = "你是式神，使用者的桌面語音助理。用使用者說話的語言簡潔回答，最多兩句，純文字、不用 Markdown，內容要適合直接朗讀。直接給答案，不要輸出思考過程、前言或自我說明。";
 const MAX_TOKENS: u32 = 300;
+
+// Short multi-turn memory (R2c): the most recent successful (user, assistant)
+// pairs, provider-neutral, so a follow-up question can reference the prior
+// answer. Process memory only — no fs/persistence, so it clears on restart.
+// Mirrors herdr::ROSTER's static-Mutex convention.
+const HISTORY_DEPTH: usize = 6;
+static HISTORY: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Prior turns oldest-first, for placing before the current question in a
+/// request. Never includes the in-flight turn (committed only after it lands).
+fn history_snapshot() -> Vec<(String, String)> {
+    HISTORY.lock().map(|h| h.clone()).unwrap_or_default()
+}
+
+/// Record one turn's outcome: append the complete (user, assistant) pair only
+/// on Ok, so a failed brain call leaves no trace and the strict user/assistant
+/// alternation never breaks. Oldest pairs beyond HISTORY_DEPTH are forgotten.
+fn commit(user: &str, result: &Result<String, String>) {
+    let Ok(assistant) = result else { return };
+    let mut h = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    h.push((user.to_string(), assistant.clone()));
+    let len = h.len();
+    if len > HISTORY_DEPTH {
+        h.drain(0..len - HISTORY_DEPTH);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -152,12 +179,42 @@ fn system_prompt(roster: &[AgentEntry]) -> String {
     )
 }
 
-fn build_request(provider: Provider, transcript: &str, roster: &[AgentEntry]) -> Value {
+/// Prior turns + the current question as strict user/assistant alternating
+/// messages ({role, content}) — the Anthropic/OpenAI wire shape. The current
+/// question is always the final `user` message.
+fn chat_messages(history: &[(String, String)], transcript: &str) -> Vec<Value> {
+    let mut msgs = Vec::with_capacity(history.len() * 2 + 1);
+    for (u, a) in history {
+        msgs.push(json!({ "role": "user", "content": u }));
+        msgs.push(json!({ "role": "assistant", "content": a }));
+    }
+    msgs.push(json!({ "role": "user", "content": transcript }));
+    msgs
+}
+
+/// Prior turns + the current question as Gemini `contents` — parts[].text with
+/// an explicit role ("user"/"model") on every entry, single-turn included.
+fn gemini_contents(history: &[(String, String)], transcript: &str) -> Vec<Value> {
+    let mut contents = Vec::with_capacity(history.len() * 2 + 1);
+    for (u, a) in history {
+        contents.push(json!({ "role": "user", "parts": [{ "text": u }] }));
+        contents.push(json!({ "role": "model", "parts": [{ "text": a }] }));
+    }
+    contents.push(json!({ "role": "user", "parts": [{ "text": transcript }] }));
+    contents
+}
+
+fn build_request(
+    provider: Provider,
+    transcript: &str,
+    roster: &[AgentEntry],
+    history: &[(String, String)],
+) -> Value {
     let system = system_prompt(roster);
     match provider {
         Provider::Gemini => json!({
             "system_instruction": { "parts": [{ "text": system }] },
-            "contents": [{ "parts": [{ "text": transcript }] }],
+            "contents": gemini_contents(history, transcript),
             "generationConfig": {
                 "maxOutputTokens": MAX_TOKENS,
                 // 2.5-flash thinks by default AND thinking tokens eat
@@ -165,19 +222,20 @@ fn build_request(provider: Provider, transcript: &str, roster: &[AgentEntry]) ->
                 "thinkingConfig": { "thinkingBudget": 0 },
             },
         }),
-        Provider::OpenAi => json!({
-            "model": provider.model(),
-            "max_completion_tokens": MAX_TOKENS,
-            "messages": [
-                { "role": "system", "content": system },
-                { "role": "user", "content": transcript },
-            ],
-        }),
+        Provider::OpenAi => {
+            let mut messages = vec![json!({ "role": "system", "content": system })];
+            messages.extend(chat_messages(history, transcript));
+            json!({
+                "model": provider.model(),
+                "max_completion_tokens": MAX_TOKENS,
+                "messages": messages,
+            })
+        }
         Provider::Anthropic => json!({
             "model": provider.model(),
             "max_tokens": MAX_TOKENS,
             "system": system,
-            "messages": [{ "role": "user", "content": transcript }],
+            "messages": chat_messages(history, transcript),
         }),
     }
 }
@@ -226,8 +284,22 @@ fn http_client() -> Client {
 }
 
 pub async fn ask(transcript: &str, roster: &[AgentEntry]) -> Result<String, String> {
+    // Snapshot prior turns BEFORE the call; commit this turn AFTER it resolves.
+    // The current question never leaks into the history it is sent with, and a
+    // failed turn (any path) is discarded by commit's Ok-only append.
+    let history = history_snapshot();
+    let result = ask_once(transcript, roster, &history).await;
+    commit(transcript, &result);
+    result
+}
+
+async fn ask_once(
+    transcript: &str,
+    roster: &[AgentEntry],
+    history: &[(String, String)],
+) -> Result<String, String> {
     let (provider, key) = detect()?;
-    let req = build_request(provider, transcript, roster);
+    let req = build_request(provider, transcript, roster, history);
 
     let mut request = match provider {
         Provider::Gemini => http_client()
@@ -341,7 +413,7 @@ mod tests {
     // BrainReply contract tests (request/response per provider)
     #[test]
     fn t1_anthropic_request_shape() {
-        let v = build_request(Provider::Anthropic, "hi", &[]);
+        let v = build_request(Provider::Anthropic, "hi", &[], &[]);
         assert_eq!(v["model"], "claude-haiku-4-5");
         assert_eq!(v["max_tokens"], 300);
         assert_eq!(v["messages"][0]["role"], "user");
@@ -351,7 +423,7 @@ mod tests {
 
     #[test]
     fn t1b_gemini_request_shape() {
-        let v = build_request(Provider::Gemini, "hi", &[]);
+        let v = build_request(Provider::Gemini, "hi", &[], &[]);
         assert_eq!(v["contents"][0]["parts"][0]["text"], "hi");
         assert!(!v["system_instruction"]["parts"][0]["text"]
             .as_str()
@@ -363,7 +435,7 @@ mod tests {
 
     #[test]
     fn t1c_openai_request_shape() {
-        let v = build_request(Provider::OpenAi, "hi", &[]);
+        let v = build_request(Provider::OpenAi, "hi", &[], &[]);
         assert_eq!(v["model"], "gpt-4.1-mini");
         assert_eq!(v["max_completion_tokens"], 300);
         assert_eq!(v["messages"][0]["role"], "system");
@@ -424,6 +496,7 @@ mod tests {
             Provider::Anthropic,
             "hi",
             &[agent("builder", "working", "", "")],
+            &[],
         );
         let sys = v["system"].as_str().unwrap();
         assert!(sys.contains("builder"));
@@ -437,6 +510,7 @@ mod tests {
             Provider::Gemini,
             "hi",
             &[agent("builder", "working", "", "")],
+            &[],
         );
         let sys = v["system_instruction"]["parts"][0]["text"].as_str().unwrap();
         assert!(sys.contains("builder"));
@@ -449,6 +523,7 @@ mod tests {
             Provider::OpenAi,
             "hi",
             &[agent("builder", "working", "", "")],
+            &[],
         );
         assert_eq!(v["messages"][0]["role"], "system");
         let sys = v["messages"][0]["content"].as_str().unwrap();
@@ -458,7 +533,7 @@ mod tests {
 
     #[test]
     fn brc4_empty_roster_says_no_observation() {
-        let v = build_request(Provider::Anthropic, "hi", &[]);
+        let v = build_request(Provider::Anthropic, "hi", &[], &[]);
         assert!(v["system"].as_str().unwrap().contains("沒有觀測到"));
     }
 
@@ -526,6 +601,178 @@ mod tests {
         assert!(extract_reply(Provider::Gemini, &v).unwrap_err().contains("gemini"));
         let v: Value = serde_json::from_str(r#"{"choices":[]}"#).unwrap();
         assert!(extract_reply(Provider::OpenAi, &v).unwrap_err().contains("openai"));
+    }
+
+    // --- R2c: short multi-turn memory ---
+    // These tests mutate the shared HISTORY static; serialize them and reset at
+    // the top of each (the lock only serializes, it does not reset state).
+    static HISTORY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_history() {
+        *HISTORY.lock().unwrap_or_else(|e| e.into_inner()) = Vec::new();
+    }
+
+    fn pair(u: &str, a: &str) -> (String, String) {
+        (u.to_string(), a.to_string())
+    }
+
+    // ConversationHistoryRetention
+    #[test]
+    fn chr1_records_pairs_in_order() {
+        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_history();
+        commit("q1", &Ok("a1".to_string()));
+        commit("q2", &Ok("a2".to_string()));
+        assert_eq!(history_snapshot(), vec![pair("q1", "a1"), pair("q2", "a2")]);
+    }
+
+    #[test]
+    fn chr2_forgets_oldest_beyond_depth() {
+        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_history();
+        for i in 1..=7 {
+            commit(&format!("q{i}"), &Ok(format!("a{i}")));
+        }
+        let snap = history_snapshot();
+        assert_eq!(snap.len(), 6);
+        assert!(!snap.iter().any(|(u, _)| u == "q1"));
+        assert_eq!(snap.first().unwrap().0, "q2");
+        assert_eq!(snap.last().unwrap().0, "q7");
+    }
+
+    // FailedTurnDiscarded
+    #[test]
+    fn ftd1_err_leaves_history_empty() {
+        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_history();
+        commit("q", &Err("boom".to_string()));
+        assert!(history_snapshot().is_empty());
+    }
+
+    #[test]
+    fn ftd2_ok_appends_pair() {
+        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_history();
+        commit("q", &Ok("a".to_string()));
+        assert_eq!(history_snapshot(), vec![pair("q", "a")]);
+    }
+
+    #[test]
+    fn ftd3_failed_turn_does_not_break_alternation() {
+        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_history();
+        commit("q1", &Ok("a1".to_string()));
+        commit("q2", &Err("boom".to_string()));
+        commit("q3", &Ok("a3".to_string()));
+        assert_eq!(history_snapshot(), vec![pair("q1", "a1"), pair("q3", "a3")]);
+    }
+
+    // RequestCarriesHistory
+    #[test]
+    fn rch1_anthropic_prepends_history() {
+        let history = vec![pair("早安", "你好")];
+        let v = build_request(Provider::Anthropic, "誰在工作", &[], &history);
+        let m = v["messages"].as_array().unwrap();
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0], json!({ "role": "user", "content": "早安" }));
+        assert_eq!(m[1], json!({ "role": "assistant", "content": "你好" }));
+        assert_eq!(m[2], json!({ "role": "user", "content": "誰在工作" }));
+        assert!(!v["system"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rch2_openai_roles_and_tail() {
+        let history = vec![pair("早安", "你好")];
+        let v = build_request(Provider::OpenAi, "誰在工作", &[], &history);
+        let m = v["messages"].as_array().unwrap();
+        let roles: Vec<&str> = m.iter().map(|x| x["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["system", "user", "assistant", "user"]);
+        assert_eq!(m.last().unwrap()["content"], "誰在工作");
+    }
+
+    #[test]
+    fn rch3_gemini_roles_and_texts() {
+        let history = vec![pair("早安", "你好")];
+        let v = build_request(Provider::Gemini, "誰在工作", &[], &history);
+        let c = v["contents"].as_array().unwrap();
+        let roles: Vec<&str> = c.iter().map(|x| x["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "model", "user"]);
+        let texts: Vec<&str> =
+            c.iter().map(|x| x["parts"][0]["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, ["早安", "你好", "誰在工作"]);
+    }
+
+    #[test]
+    fn rch4_empty_history_matches_single_turn() {
+        // Anthropic/OpenAI single-turn shape unchanged; Gemini gains role:user.
+        let a = build_request(Provider::Anthropic, "hi", &[], &[]);
+        assert_eq!(a["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(a["messages"][0], json!({ "role": "user", "content": "hi" }));
+
+        let o = build_request(Provider::OpenAi, "hi", &[], &[]);
+        let oroles: Vec<&str> = o["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(oroles, ["system", "user"]);
+
+        let g = build_request(Provider::Gemini, "hi", &[], &[]);
+        assert_eq!(g["contents"].as_array().unwrap().len(), 1);
+        assert_eq!(g["contents"][0]["role"], "user");
+        assert_eq!(g["contents"][0]["parts"][0]["text"], "hi");
+    }
+
+    // RosterFreshNotInHistory
+    #[test]
+    fn rfh1_roster_in_system_history_user_verbatim() {
+        let history = vec![pair("hi", "hello")];
+        let v = build_request(
+            Provider::Anthropic,
+            "誰在工作",
+            &[agent("builder", "working", "", "")],
+            &history,
+        );
+        assert!(v["system"].as_str().unwrap().contains("builder"));
+        let m = v["messages"].as_array().unwrap();
+        assert_eq!(m.len(), 3);
+        let first = m[0]["content"].as_str().unwrap();
+        assert_eq!(first, "hi");
+        assert!(!first.contains("builder"));
+        assert!(!first.contains("觀測到"));
+    }
+
+    #[test]
+    fn rfh2_roster_fully_from_current_param() {
+        let history = vec![pair("hi", "hello")];
+        let v1 = build_request(
+            Provider::Anthropic,
+            "誰在工作",
+            &[agent("builder", "working", "", "")],
+            &history,
+        );
+        assert!(v1["system"].as_str().unwrap().contains("builder"));
+
+        let v2 = build_request(
+            Provider::Anthropic,
+            "誰在工作",
+            &[agent("reviewer", "idle", "", "")],
+            &history,
+        );
+        let sys2 = v2["system"].as_str().unwrap();
+        assert!(sys2.contains("reviewer"));
+        assert!(!sys2.contains("builder"));
+    }
+
+    // MultiTurnLiveRecall — live end-to-end, stays #[ignore] (needs herdr + key).
+    #[test]
+    #[ignore]
+    fn mtl1_live_two_turn_recall() {
+        // given #[ignore] live: ask("現在誰在工作", roster) names X, then
+        // ask("它在做什麼", same roster) -> both Ok non-empty and the 2nd answer
+        // contains X's name — manual: 附一次逐字稿為證。
+        // run: <PROVIDER>_API_KEY=... cargo test mtl1_live -- --ignored
     }
 
     #[test]
