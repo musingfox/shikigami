@@ -8,6 +8,7 @@ mod voice;
 mod stt;
 use tauri::Emitter;
 use crate::events::VOICE_LISTENING;
+use std::path::{Path, PathBuf};
 
 // raw bytes for the frontend's WebAudio decode (lip-sync envelope)
 #[tauri::command]
@@ -100,6 +101,85 @@ async fn transcribe_utterance(pcm: Vec<u8>) -> Result<String, String> {
 /// survive zh-pinned decoding (e.g. "investment-base").
 fn roster_names() -> Vec<String> {
     herdr::get_roster().into_iter().map(|a| a.name).collect()
+}
+
+/// Where a spoken project name is looked up.
+fn workspace_root() -> PathBuf {
+    Path::new(&std::env::var("HOME").unwrap_or_default()).join("workspace")
+}
+
+/// A spoken project name → the real directory it names under `root`, or None.
+/// Only a bare directory name resolves: anything carrying a path separator or
+/// starting with a dot is refused before it touches the filesystem, so a
+/// misheard phrase can never address a path outside the workspace. A name that
+/// matches a file rather than a directory is not a project either.
+fn resolve_project(root: &Path, name: &str) -> Option<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
+        return None;
+    }
+    let path = root.join(name);
+    path.is_dir().then_some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch workspace laid out like ~/workspace, removed on drop.
+    struct Tmp(PathBuf);
+
+    impl Tmp {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("shk-ws-{tag}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Tmp(dir)
+        }
+        fn dir(&self, name: &str) -> &Self {
+            std::fs::create_dir_all(self.0.join(name)).unwrap();
+            self
+        }
+        fn file(&self, name: &str) -> &Self {
+            std::fs::write(self.0.join(name), b"x").unwrap();
+            self
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // ProjectResolution
+    #[test]
+    fn pr1_existing_directory_resolves() {
+        let t = Tmp::new("pr1");
+        t.dir("cyris");
+        assert_eq!(resolve_project(&t.0, "cyris"), Some(t.0.join("cyris")));
+    }
+
+    #[test]
+    fn pr2_unknown_name_resolves_to_nothing() {
+        let t = Tmp::new("pr2");
+        assert_eq!(resolve_project(&t.0, "nope"), None);
+    }
+
+    #[test]
+    fn pr3_a_file_is_not_a_project() {
+        let t = Tmp::new("pr3");
+        t.file("90day.pptx");
+        assert_eq!(resolve_project(&t.0, "90day.pptx"), None);
+    }
+
+    #[test]
+    fn pr4_path_traversal_and_separators_refused() {
+        let t = Tmp::new("pr4");
+        t.dir("a/b");
+        assert_eq!(resolve_project(&t.0, "../etc"), None);
+        assert_eq!(resolve_project(&t.0, "a/b"), None);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
