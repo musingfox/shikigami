@@ -42,6 +42,48 @@ fn commit(user: &str, result: &Result<String, String>) {
     }
 }
 
+/// What one brain reply amounts to: something to say out loud, or a request to
+/// summon a new agent. `parse_action` is total — anything that is not a
+/// well-formed summon instruction is speech, so a malformed reply is spoken,
+/// never acted on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummonAction {
+    Speak(String),
+    Summon { project: String, task: String },
+}
+
+/// Strip a Markdown code fence some providers wrap JSON in, so the payload can
+/// be parsed. Returns the input untouched when there is no fence.
+fn strip_fence(s: &str) -> &str {
+    let Some(rest) = s.strip_prefix("```") else {
+        return s;
+    };
+    let body = match rest.find('\n') {
+        Some(i) => &rest[i + 1..], // drop the info string ("json", "", …)
+        None => return s,
+    };
+    body.trim_end().strip_suffix("```").unwrap_or(body).trim()
+}
+
+/// Classify a brain reply. Only a JSON object with action="summon" and both a
+/// non-empty project and task becomes a Summon; everything else — prose, broken
+/// JSON, unknown actions, missing fields — is spoken verbatim.
+pub fn parse_action(reply: &str) -> SummonAction {
+    let speak = || SummonAction::Speak(reply.to_string());
+    let Ok(v) = serde_json::from_str::<Value>(strip_fence(reply.trim())) else {
+        return speak();
+    };
+    if v["action"] != "summon" {
+        return speak();
+    }
+    let field = |k: &str| v[k].as_str().unwrap_or_default().trim().to_string();
+    let (project, task) = (field("project"), field("task"));
+    if project.is_empty() || task.is_empty() {
+        return speak();
+    }
+    SummonAction::Summon { project, task }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     Gemini,
@@ -770,6 +812,90 @@ mod tests {
         let sys2 = v2["system"].as_str().unwrap();
         assert!(sys2.contains("reviewer"));
         assert!(!sys2.contains("builder"));
+    }
+
+    // --- R2d: voice summon ---
+    // SummonActionParse
+    const SUMMON_JSON: &str = r#"{"action":"summon","project":"cyris","task":"跑測試"}"#;
+
+    fn summon(project: &str, task: &str) -> SummonAction {
+        SummonAction::Summon {
+            project: project.to_string(),
+            task: task.to_string(),
+        }
+    }
+
+    #[test]
+    fn sap1_bare_json_parses_as_summon() {
+        assert_eq!(parse_action(SUMMON_JSON), summon("cyris", "跑測試"));
+    }
+
+    #[test]
+    fn sap2_fenced_json_parses_as_summon() {
+        let fenced = format!("```json\n{}\n```", SUMMON_JSON);
+        assert_eq!(parse_action(&fenced), summon("cyris", "跑測試"));
+        let bare_fence = format!("```\n{}\n```", SUMMON_JSON);
+        assert_eq!(parse_action(&bare_fence), summon("cyris", "跑測試"));
+    }
+
+    #[test]
+    fn sap3_surrounding_whitespace_ignored() {
+        let padded = format!("\n  {}  \n", SUMMON_JSON);
+        assert_eq!(parse_action(&padded), summon("cyris", "跑測試"));
+    }
+
+    #[test]
+    fn sap4_prose_is_speech() {
+        assert_eq!(
+            parse_action("好的，我會處理。"),
+            SummonAction::Speak("好的，我會處理。".to_string())
+        );
+    }
+
+    #[test]
+    fn sap5_missing_task_falls_back_to_speech() {
+        let s = r#"{"action":"summon","project":"cyris"}"#;
+        assert_eq!(parse_action(s), SummonAction::Speak(s.to_string()));
+    }
+
+    #[test]
+    fn sap6_empty_project_falls_back_to_speech() {
+        let s = r#"{"action":"summon","project":"","task":"跑測試"}"#;
+        assert_eq!(parse_action(s), SummonAction::Speak(s.to_string()));
+    }
+
+    #[test]
+    fn sap7_broken_json_is_speech_verbatim() {
+        assert_eq!(
+            parse_action("{壞掉的json"),
+            SummonAction::Speak("{壞掉的json".to_string())
+        );
+    }
+
+    #[test]
+    fn sap8_unknown_action_falls_back_to_speech() {
+        let s = r#"{"action":"focus","project":"cyris","task":"跑測試"}"#;
+        assert_eq!(parse_action(s), SummonAction::Speak(s.to_string()));
+    }
+
+    // SummonActionParse fuzzy criterion — live, stays #[ignore] (needs a key).
+    #[test]
+    #[ignore]
+    fn sap9_live_summon_phrasing_parses_and_qa_does_not() {
+        // given a real provider: 「幫我開 <專案> 做 <事>」 -> parse_action(reply)
+        // is Summon; an ordinary question -> Speak (no false trigger).
+        // --nocapture prints both replies as the transcript Review asks for.
+        // run: <PROVIDER>_API_KEY=... cargo test sap9_live -- --ignored --nocapture
+        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_history();
+        let summon = tauri::async_runtime::block_on(ask("幫我開 cyris 跑測試", &[])).unwrap();
+        println!("summon turn reply: {summon}");
+        assert!(matches!(parse_action(&summon), SummonAction::Summon { .. }));
+
+        reset_history();
+        let qa = tauri::async_runtime::block_on(ask("現在誰在工作", &[])).unwrap();
+        println!("q&a turn reply: {qa}");
+        assert!(matches!(parse_action(&qa), SummonAction::Speak(_)));
     }
 
     // MultiTurnLiveRecall — live end-to-end, stays #[ignore] (needs herdr + key).
