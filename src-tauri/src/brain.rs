@@ -173,7 +173,7 @@ fn render_roster(roster: &[AgentEntry]) -> String {
 /// model can name real working agents without the user transcript being touched.
 fn system_prompt(roster: &[AgentEntry]) -> String {
     format!(
-        "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。",
+        "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。",
         SYSTEM_PROMPT,
         render_roster(roster)
     )
@@ -487,6 +487,13 @@ mod tests {
         let row = out.lines().find(|l| l.starts_with("- ")).unwrap();
         assert_eq!(row, "- solo（idle）");
         assert!(!out.contains(" @ "));
+    }
+
+    #[test]
+    fn rp5_system_prompt_instructs_stt_fuzzy_match() {
+        let out = system_prompt(&[]);
+        assert!(out.contains("語音辨識"));
+        assert!(out.contains("相近"));
     }
 
     // BrainRequestCarriesRoster contract

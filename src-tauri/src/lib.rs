@@ -70,8 +70,10 @@ fn set_listening(app: tauri::AppHandle, on: bool) {
 // ponytail: pcm crosses IPC as a JSON byte array; switch to InvokeBody::Raw if latency matters
 #[tauri::command]
 async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), String> {
-    let transcript = tauri::async_runtime::spawn_blocking(move || voice::transcribe_bytes(pcm))
-        .await
+    let names = roster_names();
+    let transcript =
+        tauri::async_runtime::spawn_blocking(move || voice::transcribe_bytes(pcm, &names))
+            .await
         .map_err(|e| format!("stt: {e}"))?
         .map_err(|e| format!("stt: {e}"))?;
     let _ = app.emit(events::VOICE_TRANSCRIPT, transcript.clone());
@@ -87,10 +89,17 @@ async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), St
 // frontend owns the transcript-confirm-inject flow from here.
 #[tauri::command]
 async fn transcribe_utterance(pcm: Vec<u8>) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || voice::transcribe_bytes(pcm))
+    let names = roster_names();
+    tauri::async_runtime::spawn_blocking(move || voice::transcribe_bytes(pcm, &names))
         .await
         .map_err(|e| format!("stt: {e}"))?
         .map_err(|e| format!("stt: {e}"))
+}
+
+/// Roster agent names for the STT vocab bias — spoken agent names should
+/// survive zh-pinned decoding (e.g. "investment-base").
+fn roster_names() -> Vec<String> {
+    herdr::get_roster().into_iter().map(|a| a.name).collect()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

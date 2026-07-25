@@ -83,7 +83,21 @@ fn stt_language() -> String {
     std::env::var("SHIKIGAMI_STT_LANG").unwrap_or_else(|_| "zh".to_string())
 }
 
-pub fn transcribe(pcm: &[f32]) -> Result<String, String> {
+/// Decoder bias for known agent names — zh-pinned decoding mangles English
+/// compound names ("investment-base") unless whisper is primed with them.
+pub fn vocab_hint(names: &[String]) -> Option<String> {
+    let names: Vec<&str> = names
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!("對話可能提及這些 agent：{}。", names.join("、")))
+}
+
+pub fn transcribe(pcm: &[f32], vocab: &[String]) -> Result<String, String> {
     let n = validate_samples(pcm.len())?;
     let samples = if n < pcm.len() { &pcm[..n] } else { pcm };
     let ctx = get_ctx()?;
@@ -91,6 +105,10 @@ pub fn transcribe(pcm: &[f32]) -> Result<String, String> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     let lang = stt_language();
     params.set_language(Some(&lang));
+    let hint = vocab_hint(vocab);
+    if let Some(h) = &hint {
+        params.set_initial_prompt(h);
+    }
     params.set_translate(false);
     params.set_print_progress(false);
     params.set_print_special(false);
@@ -173,7 +191,20 @@ mod tests {
         // manual: cargo test -- --ignored ; needs model file
         // 1s silence -> empty or ws transcript
         let sil = vec![0.0f32; 16000];
-        let t = transcribe(&sil).unwrap_or_default();
+        let t = transcribe(&sil, &[]).unwrap_or_default();
         assert!(t.trim().is_empty());
+    }
+
+    #[test]
+    fn t8_vocab_hint_names_joined() {
+        let names = vec!["investment-base".to_string(), "ponytail".to_string()];
+        let h = vocab_hint(&names).unwrap();
+        assert!(h.contains("investment-base、ponytail"));
+    }
+
+    #[test]
+    fn t9_vocab_hint_empty_and_blank_none() {
+        assert!(vocab_hint(&[]).is_none());
+        assert!(vocab_hint(&["".to_string(), "  ".to_string()]).is_none());
     }
 }
