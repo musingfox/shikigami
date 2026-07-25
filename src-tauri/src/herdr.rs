@@ -157,11 +157,12 @@ fn step(stage: &str, result: Result<Value, String>) -> Result<Value, String> {
 /// claude in its pane, wait for it to settle, then hand it the task. One
 /// confirmed request, one fully-briefed agent — the pane is an ordinary
 /// interactive TUI the user can take over at any time (see CLAUDE.md: no
-/// headless spawn).
+/// headless spawn). Returns the new pane id, so the caller can name or focus
+/// the agent it just summoned.
 /// Wire shapes verified against the bundled schema of the installed herdr
 /// (`herdr api schema --json`, protocol 17): agent.start takes `pane_id`, and
 /// agent.wait takes `target`/`until`/`timeout_ms`.
-pub fn summon(project: &str, task: &str, cwd: &str) -> Result<(), String> {
+pub fn summon(project: &str, task: &str, cwd: &str) -> Result<String, String> {
     let sock = socket_path();
     let tab = step(
         "tab.create",
@@ -217,7 +218,7 @@ pub fn summon(project: &str, task: &str, cwd: &str) -> Result<(), String> {
             serde_json::json!({ "target": pane, "text": task }),
         ),
     )?;
-    Ok(())
+    Ok(pane)
 }
 
 /// Jump to an agent's pane: herdr switches workspace/pane focus, then we
@@ -506,14 +507,15 @@ mod tests {
             .join("workspace/shikigami");
         assert!(cwd.is_dir(), "expected a real project at {}", cwd.display());
         let cwd = cwd.to_str().unwrap();
-        summon("shikigami", "回報你在哪個目錄，不要改任何檔案", cwd).expect("summon chain");
+        let pane =
+            summon("shikigami", "回報你在哪個目錄，不要改任何檔案", cwd).expect("summon chain");
         let listed = call(0, "agent.list", serde_json::json!({})).expect("agent.list");
         let found = listed["agents"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|a| a["cwd"] == cwd && a["agent"] == "claude");
-        assert!(found, "no claude agent at {cwd} in {listed}");
+            .any(|a| a["cwd"] == cwd && a["agent"] == "claude" && a["pane_id"] == pane.as_str());
+        assert!(found, "no claude agent at {cwd} in pane {pane}: {listed}");
     }
 
     /// Integration receipt against a live herdr — run manually:

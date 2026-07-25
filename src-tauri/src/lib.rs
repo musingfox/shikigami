@@ -113,9 +113,10 @@ async fn transcribe_utterance(pcm: Vec<u8>) -> Result<String, String> {
 
 // The confirmed half of a summon proposal: the frontend confirm bar hands back
 // exactly what process_utterance proposed. Blocking (herdr brings claude up in
-// the new pane before returning), so it runs off the IPC thread.
+// the new pane before returning), so it runs off the IPC thread. Answers with
+// the new pane id, which the toast layer uses to point at the summoned agent.
 #[tauri::command]
-async fn summon_agent(project: String, task: String, cwd: String) -> Result<(), String> {
+async fn summon_agent(project: String, task: String, cwd: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || herdr::summon(&project, &task, &cwd))
         .await
         .map_err(|e| format!("summon: {e}"))?
