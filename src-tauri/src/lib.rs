@@ -71,7 +71,7 @@ fn set_listening(app: tauri::AppHandle, on: bool) {
 // ponytail: pcm crosses IPC as a JSON byte array; switch to InvokeBody::Raw if latency matters
 #[tauri::command]
 async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), String> {
-    let names = roster_names();
+    let names = stt_vocab_now();
     let transcript =
         tauri::async_runtime::spawn_blocking(move || voice::transcribe_bytes(pcm, &names))
             .await
@@ -90,7 +90,7 @@ async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), St
 // frontend owns the transcript-confirm-inject flow from here.
 #[tauri::command]
 async fn transcribe_utterance(pcm: Vec<u8>) -> Result<String, String> {
-    let names = roster_names();
+    let names = stt_vocab_now();
     tauri::async_runtime::spawn_blocking(move || voice::transcribe_bytes(pcm, &names))
         .await
         .map_err(|e| format!("stt: {e}"))?
@@ -101,6 +101,42 @@ async fn transcribe_utterance(pcm: Vec<u8>) -> Result<String, String> {
 /// survive zh-pinned decoding (e.g. "investment-base").
 fn roster_names() -> Vec<String> {
     herdr::get_roster().into_iter().map(|a| a.name).collect()
+}
+
+/// Project directory names under `root`, sorted. Files and dotted entries are
+/// not projects; an unreadable root simply has none.
+fn project_names_in(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// What whisper is primed with: agent names plus project names, each once.
+/// Project names need the same bias agent names do — "cyris" spoken into a
+/// zh-pinned decoder comes back as homophone soup without it.
+fn stt_vocab(roster: &[String], projects: &[String]) -> Vec<String> {
+    let mut vocab: Vec<String> = Vec::new();
+    for name in roster.iter().chain(projects) {
+        let name = name.trim();
+        if !name.is_empty() && !vocab.iter().any(|seen| seen == name) {
+            vocab.push(name.to_string());
+        }
+    }
+    vocab
+}
+
+/// The live vocab for one utterance: whoever is on the roster right now, plus
+/// every project that could be summoned.
+fn stt_vocab_now() -> Vec<String> {
+    stt_vocab(&roster_names(), &project_names_in(&workspace_root()))
 }
 
 /// Where a spoken project name is looked up.
@@ -150,6 +186,31 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    // SttProjectVocab
+    #[test]
+    fn sv1_only_visible_directories_are_projects() {
+        let t = Tmp::new("sv1");
+        t.dir("cyris").dir("heartwood").dir(".git").file("90day.pptx");
+        assert_eq!(project_names_in(&t.0), vec!["cyris", "heartwood"]);
+    }
+
+    #[test]
+    fn sv2_missing_root_has_no_projects() {
+        let missing = std::env::temp_dir().join("shk-ws-does-not-exist");
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(project_names_in(&missing).is_empty());
+    }
+
+    #[test]
+    fn sv3_vocab_merges_roster_and_projects_without_repeats() {
+        let roster = vec!["builder".to_string()];
+        let projects = vec!["cyris".to_string(), "builder".to_string()];
+        let vocab = stt_vocab(&roster, &projects);
+        assert_eq!(vocab.iter().filter(|n| *n == "builder").count(), 1);
+        assert_eq!(vocab.iter().filter(|n| *n == "cyris").count(), 1);
+        assert_eq!(vocab.len(), 2);
     }
 
     // ProjectResolution
