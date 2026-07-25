@@ -16,6 +16,11 @@ use crate::events::AgentEntry;
 const SYSTEM_PROMPT: &str = "你是式神，使用者的桌面語音助理。用使用者說話的語言簡潔回答，最多兩句，純文字、不用 Markdown，內容要適合直接朗讀。直接給答案，不要輸出思考過程、前言或自我說明。";
 const MAX_TOKENS: u32 = 300;
 
+// Appended to the system prompt so a "go open project X and do Y" request comes
+// back machine-readable instead of as a verbal promise. The JSON is written
+// colon-tight and fence-free because parse_action only accepts a bare object.
+const SUMMON_INSTRUCTION: &str = "使用者若要求在某個專案開一個新的 agent 去做事（例如「幫我開 cyris 跑測試」「叫一個新的去 heartwood 修 bug」），不要口頭答應，只輸出這個 JSON 物件本身，不要加任何前言、說明或 Markdown 標記：{\"action\":\"summon\",\"project\":\"專案名\",\"task\":\"要做的事\"}。其中 \"project\" 填專案名稱、\"task\" 填要交辦的事，都照使用者說的內容填。其他所有情況——閒聊、一般問答、詢問現有 agent 的狀態或進度——都照常用口語回答，絕對不要輸出 JSON。";
+
 // Short multi-turn memory (R2c): the most recent successful (user, assistant)
 // pairs, provider-neutral, so a follow-up question can reference the prior
 // answer. Process memory only — no fs/persistence, so it clears on restart.
@@ -227,9 +232,10 @@ fn render_roster(roster: &[AgentEntry]) -> String {
 /// model can name real working agents without the user transcript being touched.
 fn system_prompt(roster: &[AgentEntry]) -> String {
     format!(
-        "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。",
+        "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
         SYSTEM_PROMPT,
-        render_roster(roster)
+        render_roster(roster),
+        SUMMON_INSTRUCTION
     )
 }
 
@@ -827,6 +833,23 @@ mod tests {
     }
 
     // --- R2d: voice summon ---
+    // SummonPromptInstruction
+    #[test]
+    fn spi1_prompt_carries_summon_json_literals() {
+        let out = system_prompt(&[]);
+        assert!(out.contains(r#""action":"summon""#));
+        assert!(out.contains(r#""project""#));
+        assert!(out.contains(r#""task""#));
+    }
+
+    #[test]
+    fn spi2_summon_instruction_is_additive() {
+        let out = system_prompt(&[]);
+        assert!(out.contains(SYSTEM_PROMPT));
+        assert!(out.contains("沒有觀測到"));
+        assert!(out.contains("語音辨識"));
+    }
+
     // SummonActionParse
     const SUMMON_JSON: &str = r#"{"action":"summon","project":"cyris","task":"跑測試"}"#;
 
