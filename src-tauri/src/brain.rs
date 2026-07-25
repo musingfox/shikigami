@@ -74,9 +74,10 @@ fn strip_fence(s: &str) -> &str {
 
 /// Classify a brain reply. Only a JSON object with action="summon" and both a
 /// non-empty project and task becomes a Summon; everything else — prose, broken
-/// JSON, unknown actions, missing fields — is spoken verbatim.
+/// JSON, unknown actions, missing fields — is spoken as-is. Speak text is
+/// trimmed, so a model's trailing newline never reaches history.log or TTS.
 pub fn parse_action(reply: &str) -> SummonAction {
-    let speak = || SummonAction::Speak(reply.to_string());
+    let speak = || SummonAction::Speak(reply.trim().to_string());
     let Ok(v) = serde_json::from_str::<Value>(strip_fence(reply.trim())) else {
         return speak();
     };
@@ -911,6 +912,20 @@ mod tests {
     fn sap8_unknown_action_falls_back_to_speech() {
         let s = r#"{"action":"focus","project":"cyris","task":"跑測試"}"#;
         assert_eq!(parse_action(s), SummonAction::Speak(s.to_string()));
+    }
+
+    #[test]
+    fn sap10_speak_text_is_trimmed() {
+        // a model's trailing newline must not reach history.log / TTS
+        assert_eq!(
+            parse_action("好的，我會處理。\n\n"),
+            SummonAction::Speak("好的，我會處理。".to_string())
+        );
+        // the same holds on the malformed-JSON fallback path
+        assert_eq!(
+            parse_action("  {壞掉的json\n"),
+            SummonAction::Speak("{壞掉的json".to_string())
+        );
     }
 
     // SummonActionParse fuzzy criterion — live, stays #[ignore] (needs a key).
