@@ -130,6 +130,96 @@ pub fn prompt_agent(pane: String, text: String) -> Result<(), String> {
     Ok(())
 }
 
+/// How long herdr may spend bringing a new agent up. Its own budget is
+/// SUMMON_TIMEOUT_MS (>3000, <=300000 per protocol 17); our socket read has to
+/// outlast that, or we abandon the connection just before herdr explains what
+/// went wrong.
+const SUMMON_TIMEOUT_MS: u64 = 120_000;
+const SUMMON_READ_TIMEOUT: Duration = Duration::from_secs(150);
+
+/// The pane a fresh `tab.create` opened, from its `tab_created` result.
+pub fn extract_pane_id(result: &Value) -> Result<String, String> {
+    result
+        .get("root_pane")
+        .and_then(|p| p.get("pane_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "summon tab.create: result has no root_pane.pane_id".to_string())
+}
+
+/// Tag a failed summon step with the herdr method that broke, so a half-built
+/// chain reports where it stopped.
+fn step(stage: &str, result: Result<Value, String>) -> Result<Value, String> {
+    result.map_err(|e| format!("summon {stage}: {e}"))
+}
+
+/// Summon a new claude agent: open a tab in the project directory, start
+/// claude in its pane, wait for it to settle, then hand it the task. One
+/// confirmed request, one fully-briefed agent — the pane is an ordinary
+/// interactive TUI the user can take over at any time (see CLAUDE.md: no
+/// headless spawn).
+/// Wire shapes verified against the bundled schema of the installed herdr
+/// (`herdr api schema --json`, protocol 17): agent.start takes `pane_id`, and
+/// agent.wait takes `target`/`until`/`timeout_ms`.
+pub fn summon(project: &str, task: &str, cwd: &str) -> Result<(), String> {
+    let sock = socket_path();
+    let tab = step(
+        "tab.create",
+        call_at(
+            &sock,
+            CALL_TIMEOUT,
+            0,
+            "tab.create",
+            serde_json::json!({ "cwd": cwd, "label": project }),
+        ),
+    )?;
+    let pane = extract_pane_id(&tab)?;
+    step(
+        "agent.start",
+        call_at(
+            &sock,
+            SUMMON_READ_TIMEOUT,
+            0,
+            "agent.start",
+            serde_json::json!({
+                "name": project,
+                "kind": "claude",
+                "pane_id": pane,
+                "timeout_ms": SUMMON_TIMEOUT_MS,
+            }),
+        ),
+    )?;
+    step(
+        "agent.wait",
+        call_at(
+            &sock,
+            SUMMON_READ_TIMEOUT,
+            0,
+            "agent.wait",
+            // herdr's own `agent wait` default (per its CLI help): settled
+            // means idle, done, OR blocked. Waiting only for idle would hang
+            // the full timeout whenever a fresh claude stops at a prompt —
+            // a first-run trust dialog reports blocked, not idle.
+            serde_json::json!({
+                "target": pane,
+                "until": ["idle", "done", "blocked"],
+                "timeout_ms": SUMMON_TIMEOUT_MS,
+            }),
+        ),
+    )?;
+    step(
+        "agent.prompt",
+        call_at(
+            &sock,
+            SUMMON_READ_TIMEOUT,
+            0,
+            "agent.prompt",
+            serde_json::json!({ "target": pane, "text": task }),
+        ),
+    )?;
+    Ok(())
+}
+
 /// Jump to an agent's pane: herdr switches workspace/pane focus, then we
 /// bring the terminal app forward.
 /// ponytail: terminal app hardcoded to Ghostty; configurable when needed.
@@ -384,6 +474,46 @@ mod tests {
         let err =
             call_at(&path, Duration::from_secs(1), 1, "ping", serde_json::json!({})).unwrap_err();
         assert!(err.contains("herdr connect"), "{err}");
+    }
+
+    // SummonChain
+    #[test]
+    fn sc1_pane_id_read_from_tab_created() {
+        let result =
+            serde_json::json!({ "root_pane": { "pane_id": "wZ:p1" }, "tab_id": "wZ:t1" });
+        assert_eq!(extract_pane_id(&result).unwrap(), "wZ:p1");
+    }
+
+    #[test]
+    fn sc2_missing_pane_id_names_the_step_that_failed() {
+        let err = extract_pane_id(&serde_json::json!({})).unwrap_err();
+        assert!(err.contains("tab.create"), "{err}");
+    }
+
+    #[test]
+    fn sc3_step_failure_carries_its_herdr_method() {
+        let err = step("agent.start", Err("connection closed".to_string())).unwrap_err();
+        assert_eq!(err, "summon agent.start: connection closed");
+    }
+
+    /// T4 — the whole chain against a live herdr, on a real project directory.
+    /// Run manually: `cargo test -- --ignored live_summon`. Leaves a claude
+    /// agent running in a new tab.
+    #[test]
+    #[ignore]
+    fn live_summon_opens_a_briefed_claude_agent() {
+        let cwd = std::path::Path::new(&std::env::var("HOME").unwrap())
+            .join("workspace/shikigami");
+        assert!(cwd.is_dir(), "expected a real project at {}", cwd.display());
+        let cwd = cwd.to_str().unwrap();
+        summon("shikigami", "回報你在哪個目錄，不要改任何檔案", cwd).expect("summon chain");
+        let listed = call(0, "agent.list", serde_json::json!({})).expect("agent.list");
+        let found = listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["cwd"] == cwd && a["agent"] == "claude");
+        assert!(found, "no claude agent at {cwd} in {listed}");
     }
 
     /// Integration receipt against a live herdr — run manually:

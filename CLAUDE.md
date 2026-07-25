@@ -57,6 +57,14 @@ See `ARCHITECTURE.md` — hexagonal, one core event contract
   two reasons: positioning — ACP-spawned agents have no TUI, which conflicts
   with "agents run in *your* terminals"; and the billing risk if the pause
   lifts. Channel ② injects into the user's live pane, never spawns.
+- **Summon boundary (R2d).** Voice summon opens a herdr tab in the project
+  directory and starts claude in that pane (`tab.create` → `agent.start` →
+  `agent.wait` → `agent.prompt`). This does not weaken the rule above: the new
+  agent is an ordinary interactive TUI the user can take over, attach to, or
+  Ctrl-C — shikigami opened a terminal on their behalf, exactly as they would
+  have. What stays banned is the headless path: `claude -p`, the Agent SDK, and
+  ACP spawns, none of which leave a pane to take over. A summon is always
+  preceded by an explicit confirm.
 - **SumVox stays untouched.** shikigami is a second consumer of its files
   (`now_playing` = audio path, `history.log` = "RFC3339\ttext" lines,
   `muted` = flag file). SumVox's own CC Stop hook is what feeds channel ①.

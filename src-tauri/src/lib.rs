@@ -97,6 +97,16 @@ async fn transcribe_utterance(pcm: Vec<u8>) -> Result<String, String> {
         .map_err(|e| format!("stt: {e}"))
 }
 
+// The confirmed half of a summon proposal: the frontend confirm bar hands back
+// exactly what process_utterance proposed. Blocking (herdr brings claude up in
+// the new pane before returning), so it runs off the IPC thread.
+#[tauri::command]
+async fn summon_agent(project: String, task: String, cwd: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || herdr::summon(&project, &task, &cwd))
+        .await
+        .map_err(|e| format!("summon: {e}"))?
+}
+
 /// Roster agent names for the STT vocab bias — spoken agent names should
 /// survive zh-pinned decoding (e.g. "investment-base").
 fn roster_names() -> Vec<String> {
@@ -246,7 +256,7 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file, process_utterance, transcribe_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, herdr::get_roster, herdr::focus_agent, herdr::prompt_agent])
+        .invoke_handler(tauri::generate_handler![read_file, process_utterance, transcribe_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, summon_agent, herdr::get_roster, herdr::focus_agent, herdr::prompt_agent])
         .setup(|app| {
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());
