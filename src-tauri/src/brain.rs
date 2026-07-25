@@ -31,11 +31,13 @@ fn history_snapshot() -> Vec<(String, String)> {
 
 /// Record one turn's outcome: append the complete (user, assistant) pair only
 /// on Ok, so a failed brain call leaves no trace and the strict user/assistant
-/// alternation never breaks. Oldest pairs beyond HISTORY_DEPTH are forgotten.
+/// alternation never breaks. A summon turn is stored as its semantic summary,
+/// not its JSON. Oldest pairs beyond HISTORY_DEPTH are forgotten.
 fn commit(user: &str, result: &Result<String, String>) {
     let Ok(assistant) = result else { return };
+    let assistant = history_text(&parse_action(assistant));
     let mut h = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
-    h.push((user.to_string(), assistant.clone()));
+    h.push((user.to_string(), assistant));
     let len = h.len();
     if len > HISTORY_DEPTH {
         h.drain(0..len - HISTORY_DEPTH);
@@ -82,6 +84,16 @@ pub fn parse_action(reply: &str) -> SummonAction {
         return speak();
     }
     SummonAction::Summon { project, task }
+}
+
+/// What a turn leaves in multi-turn memory: a summon is remembered as a plain
+/// sentence, so later answers recall who was summoned to do what without
+/// learning to emit JSON.
+fn history_text(action: &SummonAction) -> String {
+    match action {
+        SummonAction::Speak(text) => text.clone(),
+        SummonAction::Summon { project, task } => format!("（召喚 {}：{}）", project, task),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -896,6 +908,34 @@ mod tests {
         let qa = tauri::async_runtime::block_on(ask("現在誰在工作", &[])).unwrap();
         println!("q&a turn reply: {qa}");
         assert!(matches!(parse_action(&qa), SummonAction::Speak(_)));
+    }
+
+    // SummonHistoryCommit
+    #[test]
+    fn shc1_summon_turn_remembered_as_sentence() {
+        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_history();
+        commit("幫我開 cyris 跑測試", &Ok(SUMMON_JSON.to_string()));
+        let (_, assistant) = history_snapshot().pop().unwrap();
+        assert_eq!(assistant, "（召喚 cyris：跑測試）");
+        assert!(!assistant.contains('{'));
+        assert!(!assistant.contains("action"));
+    }
+
+    #[test]
+    fn shc2_spoken_turn_stored_verbatim() {
+        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_history();
+        commit("你好嗎", &Ok("你好".to_string()));
+        assert_eq!(history_snapshot().pop().unwrap().1, "你好");
+    }
+
+    #[test]
+    fn shc3_failed_summon_turn_not_recorded() {
+        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_history();
+        commit("幫我開 cyris 跑測試", &Err("boom".to_string()));
+        assert!(history_snapshot().is_empty());
     }
 
     // MultiTurnLiveRecall — live end-to-end, stays #[ignore] (needs herdr + key).
