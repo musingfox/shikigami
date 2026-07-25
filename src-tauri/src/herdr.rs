@@ -19,6 +19,8 @@ use tauri::Emitter;
 
 const POLL: Duration = Duration::from_secs(2);
 const RETRY: Duration = Duration::from_secs(3);
+/// Everyday read timeout: every non-blocking herdr method answers instantly.
+const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 // Last seen roster, for the get_roster command — the frontend may start
 // listening after the last agent:roster event already fired.
@@ -45,10 +47,23 @@ fn socket_path() -> std::path::PathBuf {
 /// One request/response round-trip on a fresh connection (the server closes
 /// after each response, so there is nothing to keep alive).
 fn call(id: u64, method: &str, params: Value) -> Result<Value, String> {
-    let stream =
-        UnixStream::connect(socket_path()).map_err(|e| format!("herdr connect: {e}"))?;
+    call_at(&socket_path(), CALL_TIMEOUT, id, method, params)
+}
+
+/// `call` with the socket path and read timeout spelled out. Blocking herdr
+/// methods (`agent.start`, `agent.wait`) run far longer than the everyday 5s,
+/// and the socket read must outlast herdr's own `timeout_ms` — otherwise we
+/// time out first and lose the real error it was about to send.
+fn call_at(
+    sock: &std::path::Path,
+    timeout: Duration,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    let stream = UnixStream::connect(sock).map_err(|e| format!("herdr connect: {e}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(timeout))
         .map_err(|e| format!("herdr timeout cfg: {e}"))?;
     let mut conn = BufReader::new(stream);
     let req = serde_json::json!({
@@ -319,6 +334,56 @@ mod tests {
         *ROSTER.lock().unwrap() = Vec::new();
         let prev = take_roster_on_disconnect();
         assert!(prev.is_empty());
+    }
+
+    // HerdrCallTimeout — a throwaway listener stands in for herdr. Socket names
+    // stay short: macOS caps a unix path at ~104 bytes.
+    fn tmp_sock(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("shk-{tag}.sock"));
+        let _ = std::fs::remove_file(&p); // a stale file from a past run means AddrInUse
+        p
+    }
+
+    #[test]
+    fn ct1_call_at_returns_result_within_timeout() {
+        let path = tmp_sock("ct1");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut req = String::new();
+            BufReader::new(s.try_clone().unwrap()).read_line(&mut req).unwrap();
+            s.write_all(b"{\"id\":\"shikigami-1\",\"result\":{\"ok\":true}}\n").unwrap();
+        });
+        let got = call_at(&path, Duration::from_secs(2), 1, "ping", serde_json::json!({}));
+        h.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got.unwrap(), serde_json::json!({"ok": true}));
+    }
+
+    #[test]
+    fn ct2_call_at_times_out_when_server_never_answers() {
+        let path = tmp_sock("ct2");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // Hold the accepted stream: dropping it would close the connection and
+        // yield "connection closed" instead of the read timeout under test.
+        let h = std::thread::spawn(move || {
+            let (_held, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        let err = call_at(&path, Duration::from_millis(200), 1, "ping", serde_json::json!({}))
+            .unwrap_err();
+        assert!(err.contains("herdr read"), "{err}");
+        h.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ct3_call_at_missing_socket_is_a_connect_error() {
+        let path = std::env::temp_dir().join("shk-nonexistent.sock");
+        let _ = std::fs::remove_file(&path);
+        let err =
+            call_at(&path, Duration::from_secs(1), 1, "ping", serde_json::json!({})).unwrap_err();
+        assert!(err.contains("herdr connect"), "{err}");
     }
 
     /// Integration receipt against a live herdr — run manually:
