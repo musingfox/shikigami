@@ -6,17 +6,28 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentEntry } from "./events";
-import { isListening, setCaptureReadyListener, setUtteranceInterceptor, toggleTalk } from "./mic";
+import type { SummonProposal } from "./mic";
+import {
+  isListening,
+  setCaptureReadyListener,
+  setSummonHandler,
+  setUtteranceInterceptor,
+  toggleTalk,
+} from "./mic";
 import { toast } from "./toast";
 import { acquireLarge, releaseLarge } from "./window-frame";
 
 type Target = { pane: string; name: string };
 
 let target: Target | null = null;
+let pendingSummon: SummonProposal | null = null;
 let testMode = false;
 
 export const testConfirms: { name: string; text: string }[] = [];
 export const testInjects: { pane: string; text: string }[] = [];
+export const testSummonConfirms: { project: string; task: string }[] = [];
+export const testSummonSends: { cmd: string; args: Record<string, unknown> }[] = [];
+export const testSummonOk: { project: string; task: string }[] = [];
 // Promise-wrapped so a missing Tauri runtime rejects instead of throwing
 const defaultInvoke = (cmd: string, args?: Record<string, unknown>): Promise<unknown> =>
   Promise.resolve().then(() => invoke(cmd, args));
@@ -26,8 +37,12 @@ export function __setTestModeForTest(v: boolean) { testMode = v; }
 export function __setInvokeForTest(fn: typeof defaultInvoke | null) { invokeImpl = fn ?? defaultInvoke; }
 export function __resetForTest() {
   target = null;
+  pendingSummon = null;
   testConfirms.length = 0;
   testInjects.length = 0;
+  testSummonConfirms.length = 0;
+  testSummonSends.length = 0;
+  testSummonOk.length = 0;
   invokeImpl = defaultInvoke;
 }
 export function __getTargetForTest() { return target; }
@@ -171,6 +186,94 @@ function inject(t: Target, text: string) {
     .catch((e) => toast("⚠ " + String(e)));
 }
 
+// === Summon (R2d) ===
+// Same confirm-before-act policy as inject, one step earlier: the brain only
+// ever *proposes* a new agent; the pane, the agent and the task are created by
+// summon_agent, and only ✓ calls it.
+export function onSummonProposal(p: SummonProposal) {
+  pendingSummon = p;
+  if (testMode) {
+    testSummonConfirms.push({ project: p.project, task: p.task });
+    return;
+  }
+  showSummonConfirm(p);
+}
+
+export async function confirmSummon(task: string): Promise<void> {
+  const p = pendingSummon;
+  pendingSummon = null;
+  const edited = task.trim();
+  if (!p || !edited) {
+    hideConfirm(); // empty task = same as cancel, nothing is created
+    return;
+  }
+  const args = { project: p.project, task: edited, cwd: p.cwd };
+  if (testMode) testSummonSends.push({ cmd: "summon_agent", args });
+  // the chain (tab.create → agent.start → wait → prompt) takes ~10s; keep the
+  // bubble up so the window isn't silently idle-looking meanwhile
+  showStage(`⚡ 召喚 ${p.project} 中…`);
+  try {
+    await invokeImpl("summon_agent", args);
+    if (testMode) testSummonOk.push({ project: args.project, task: args.task });
+    hideConfirm();
+    if (!testMode) toast(`已召喚 ${p.project}`);
+  } catch (e) {
+    // the herdr chain can fail at any of tab.create/agent.start/wait/prompt —
+    // surface it, never let it escape into the caller's await
+    hideConfirm();
+    if (!testMode) toast("⚠ " + String(e));
+  }
+}
+
+export function cancelSummon() {
+  pendingSummon = null;
+  hideConfirm();
+}
+
+function showSummonConfirm(p: SummonProposal) {
+  const el = confirmEl();
+  el.innerHTML = "";
+  const head = document.createElement("span");
+  head.className = "summon-target";
+  head.textContent = `⚡ 召喚 ${p.project}`;
+  // the task is editable before summoning — the brain paraphrases
+  const input = document.createElement("textarea");
+  input.value = p.task;
+  input.rows = 2;
+  const autosize = () => {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 100)}px`;
+  };
+  input.oninput = autosize;
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const ok = document.createElement("button");
+  ok.textContent = "✓ 召喚";
+  ok.onclick = () => { confirmSummon(input.value); };
+  const no = document.createElement("button");
+  no.textContent = "✕ 取消";
+  no.onclick = cancelSummon;
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      ok.click();
+    }
+  };
+  actions.append(no, ok);
+  el.append(head, input, actions);
+  setTimeout(() => {
+    autosize();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }, 0);
+  if (!confirmShown) {
+    confirmShown = true;
+    acquireLarge().then(() => el.classList.add("show"));
+  } else {
+    el.classList.add("show");
+  }
+}
+
 function hideConfirm() {
   if (testMode || typeof document === "undefined") {
     confirmShown = false;
@@ -185,12 +288,13 @@ function hideConfirm() {
 
 export function initCommand() {
   setUtteranceInterceptor(onUtterance);
+  setSummonHandler(onSummonProposal);
   setCaptureReadyListener((ready) => {
     if (ready && target) {
       showStage(`🔴 對 ${target.name} 說話中…`, "■ 結束", () => { toggleTalk(); });
     }
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") hideConfirm();
+    if (e.key === "Escape") cancelSummon();
   });
 }

@@ -196,6 +196,13 @@ body.menu-open #roster-label {
   margin-bottom: 6px;
 }
 
+/* summon proposal: the project about to be created reads brighter than a
+   transcript — same amber bar, one notch of emphasis */
+#confirm-bar span.summon-target {
+  color: #fbbf24;
+  letter-spacing: 0.04em;
+}
+
 /* editable transcript: Enter sends, Shift+Enter newlines */
 #confirm-bar textarea {
   display: block;
