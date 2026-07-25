@@ -2,8 +2,33 @@
 // For BrainReply contract: exposes reply step.
 // ponytail: macOS cfg only for hotkeys; core logic cross.
 
-use crate::brain;
+use crate::brain::{self, SummonAction};
 use crate::events::AgentEntry;
+
+/// How one utterance ends — the two outcomes are mutually exclusive. A summon
+/// proposal is data for the confirm bar, never something to read out, so the
+/// brain's JSON can't reach the speaker.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Utterance {
+    Spoken { text: String },
+    Summon { project: String, task: String, cwd: String },
+}
+
+/// Decide an utterance's ending: speech stays speech, and a summon becomes a
+/// proposal only once its project resolved to a real directory. An unresolved
+/// project is asked about out loud rather than guessed at.
+pub fn route(action: SummonAction, cwd: Option<String>) -> Utterance {
+    match action {
+        SummonAction::Speak(text) => Utterance::Spoken { text },
+        SummonAction::Summon { project, task } => match cwd {
+            Some(cwd) => Utterance::Summon { project, task, cwd },
+            None => Utterance::Spoken {
+                text: format!("找不到專案 {project}，要開哪個專案？"),
+            },
+        },
+    }
+}
 
 /// Each voice reply is grounded in the roster snapshot passed by the caller at
 /// call time, so "誰在工作" names the agents actually working right now.
@@ -89,6 +114,50 @@ mod tests {
     #[test]
     fn t5_toggle_pressed_not_listening_toggles_window() {
         assert_eq!(shortcut_action(false, ShortcutState::Pressed, false), VoiceShortcut::ToggleWindow);
+    }
+
+    // UtteranceOutcomeRouting
+    fn summon_action() -> SummonAction {
+        SummonAction::Summon { project: "cyris".into(), task: "跑測試".into() }
+    }
+
+    #[test]
+    fn uo1_speech_is_spoken_as_is() {
+        assert_eq!(
+            route(SummonAction::Speak("你好".into()), None),
+            Utterance::Spoken { text: "你好".into() }
+        );
+    }
+
+    #[test]
+    fn uo2_resolved_summon_becomes_a_proposal_for_the_frontend() {
+        let out = route(summon_action(), Some("/Users/x/workspace/cyris".into()));
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            serde_json::json!({
+                "kind": "summon",
+                "project": "cyris",
+                "task": "跑測試",
+                "cwd": "/Users/x/workspace/cyris"
+            })
+        );
+    }
+
+    #[test]
+    fn uo3_unresolved_project_is_asked_about_never_summoned() {
+        assert_eq!(
+            route(summon_action(), None),
+            Utterance::Spoken { text: "找不到專案 cyris，要開哪個專案？".into() }
+        );
+    }
+
+    #[test]
+    fn uo4_spoken_serializes_with_its_kind() {
+        let out = Utterance::Spoken { text: "hi".into() };
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            serde_json::json!({ "kind": "spoken", "text": "hi" })
+        );
     }
 
     // VoiceReplyUsesLiveRoster contract

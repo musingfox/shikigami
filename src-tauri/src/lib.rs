@@ -66,11 +66,16 @@ fn set_listening(app: tauri::AppHandle, on: bool) {
     let _ = app.emit(VOICE_LISTENING, on);
 }
 
-// Full voice loop: pcm f32le@16k → whisper STT → transcript event → brain → speak-back.
+// Full voice loop: pcm f32le@16k → whisper STT → transcript event → brain →
+// routed outcome. A spoken reply is said out loud here; a summon proposal is
+// returned for the frontend to confirm, and deliberately never spoken.
 // Errors carry a stage label ("stt:"/"brain:"/"speak:") for the frontend toast.
 // ponytail: pcm crosses IPC as a JSON byte array; switch to InvokeBody::Raw if latency matters
 #[tauri::command]
-async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), String> {
+async fn process_utterance(
+    app: tauri::AppHandle,
+    pcm: Vec<u8>,
+) -> Result<voice::Utterance, String> {
     let names = stt_vocab_now();
     let transcript =
         tauri::async_runtime::spawn_blocking(move || voice::transcribe_bytes(pcm, &names))
@@ -81,9 +86,18 @@ async fn process_utterance(app: tauri::AppHandle, pcm: Vec<u8>) -> Result<(), St
     let reply = voice::reply_to_transcript(&transcript, &herdr::get_roster())
         .await
         .map_err(|e| format!("brain: {e}"))?;
-    sumvox::record_to(&sumvox::config_dir(), &reply).map_err(|e| format!("speak: {e}"))?;
-    sumvox::spawn_say(&reply).map_err(|e| format!("speak: {e}"))?;
-    Ok(())
+    let action = brain::parse_action(&reply);
+    let cwd = match &action {
+        brain::SummonAction::Summon { project, .. } => resolve_project(&workspace_root(), project)
+            .map(|p| p.to_string_lossy().into_owned()),
+        brain::SummonAction::Speak(_) => None,
+    };
+    let outcome = voice::route(action, cwd);
+    if let voice::Utterance::Spoken { text } = &outcome {
+        sumvox::record_to(&sumvox::config_dir(), text).map_err(|e| format!("speak: {e}"))?;
+        sumvox::spawn_say(text).map_err(|e| format!("speak: {e}"))?;
+    }
+    Ok(outcome)
 }
 
 // STT-only step for targeted talk (R2a): no brain, no speak-back — the
@@ -166,6 +180,69 @@ fn resolve_project(root: &Path, name: &str) -> Option<PathBuf> {
     }
     let path = root.join(name);
     path.is_dir().then_some(path)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![read_file, process_utterance, transcribe_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, summon_agent, herdr::get_roster, herdr::focus_agent, herdr::prompt_agent])
+        .setup(|app| {
+            tray::init(app.handle())?;
+            sumvox::spawn_watcher(app.handle().clone());
+            herdr::spawn_watcher(app.handle().clone());
+            cchooks::spawn_watcher(app.handle().clone());
+            std::thread::spawn(stt::warmup); // model load off the first utterance
+
+            // ponytail: macOS only — Linux hotkey = Hyprland bind (M4), Wayland can't self-register
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::Manager;
+                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+
+                let toggle_shortcut =
+                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyS);
+                let ptt_shortcut =
+                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyM);
+                app.handle().plugin(
+                    tauri_plugin_global_shortcut::Builder::new()
+                        .with_handler(move |app, shortcut, event| {
+                            use std::sync::atomic::Ordering;
+                            use voice::VoiceShortcut;
+                            let action = voice::shortcut_action(
+                                shortcut == &ptt_shortcut,
+                                event.state(),
+                                voice::LISTENING.load(Ordering::SeqCst),
+                            );
+                            match action {
+                                VoiceShortcut::StartListening => {
+                                    voice::LISTENING.store(true, Ordering::SeqCst);
+                                    let _ = app.emit(VOICE_LISTENING, true);
+                                }
+                                VoiceShortcut::StopListening => {
+                                    voice::LISTENING.store(false, Ordering::SeqCst);
+                                    let _ = app.emit(VOICE_LISTENING, false);
+                                }
+                                VoiceShortcut::ToggleWindow => {
+                                    if let Some(w) = app.get_webview_window("main") {
+                                        if w.is_visible().unwrap_or(false) {
+                                            let _ = w.hide();
+                                        } else {
+                                            let _ = w.show();
+                                        }
+                                    }
+                                }
+                                VoiceShortcut::Ignore => {}
+                            }
+                        })
+                        .build(),
+                )?;
+                app.global_shortcut().register(toggle_shortcut)?;
+                app.global_shortcut().register(ptt_shortcut)?;
+            }
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
 
 #[cfg(test)]
@@ -251,67 +328,4 @@ mod tests {
         assert_eq!(resolve_project(&t.0, "../etc"), None);
         assert_eq!(resolve_project(&t.0, "a/b"), None);
     }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file, process_utterance, transcribe_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, summon_agent, herdr::get_roster, herdr::focus_agent, herdr::prompt_agent])
-        .setup(|app| {
-            tray::init(app.handle())?;
-            sumvox::spawn_watcher(app.handle().clone());
-            herdr::spawn_watcher(app.handle().clone());
-            cchooks::spawn_watcher(app.handle().clone());
-            std::thread::spawn(stt::warmup); // model load off the first utterance
-
-            // ponytail: macOS only — Linux hotkey = Hyprland bind (M4), Wayland can't self-register
-            #[cfg(target_os = "macos")]
-            {
-                use tauri::Manager;
-                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
-
-                let toggle_shortcut =
-                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyS);
-                let ptt_shortcut =
-                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyM);
-                app.handle().plugin(
-                    tauri_plugin_global_shortcut::Builder::new()
-                        .with_handler(move |app, shortcut, event| {
-                            use std::sync::atomic::Ordering;
-                            use voice::VoiceShortcut;
-                            let action = voice::shortcut_action(
-                                shortcut == &ptt_shortcut,
-                                event.state(),
-                                voice::LISTENING.load(Ordering::SeqCst),
-                            );
-                            match action {
-                                VoiceShortcut::StartListening => {
-                                    voice::LISTENING.store(true, Ordering::SeqCst);
-                                    let _ = app.emit(VOICE_LISTENING, true);
-                                }
-                                VoiceShortcut::StopListening => {
-                                    voice::LISTENING.store(false, Ordering::SeqCst);
-                                    let _ = app.emit(VOICE_LISTENING, false);
-                                }
-                                VoiceShortcut::ToggleWindow => {
-                                    if let Some(w) = app.get_webview_window("main") {
-                                        if w.is_visible().unwrap_or(false) {
-                                            let _ = w.hide();
-                                        } else {
-                                            let _ = w.show();
-                                        }
-                                    }
-                                }
-                                VoiceShortcut::Ignore => {}
-                            }
-                        })
-                        .build(),
-                )?;
-                app.global_shortcut().register(toggle_shortcut)?;
-                app.global_shortcut().register(ptt_shortcut)?;
-            }
-            Ok(())
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }
