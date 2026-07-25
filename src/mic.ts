@@ -103,6 +103,32 @@ export function setUtteranceInterceptor(fn: ((pcm: number[]) => Promise<boolean>
   utteranceInterceptor = fn;
 }
 
+// Summon (R2d): process_utterance now answers with a tagged outcome — either
+// the reply was already spoken by Rust, or the brain asked to summon a new
+// agent, which must reach the confirm bar before anything is created.
+export type SummonProposal = { project: string; task: string; cwd: string };
+
+let summonHandler: ((p: SummonProposal) => void) | null = null;
+export function setSummonHandler(fn: ((p: SummonProposal) => void) | null) {
+  summonHandler = fn;
+}
+
+// true = a well-formed summon proposal was routed to onSummon. Anything else
+// (spoken, older unit returns, missing fields) is false and stays silent —
+// a half-filled proposal must never become a pane.
+export function handleUtteranceOutcome(
+  outcome: unknown,
+  onSummon: (p: SummonProposal) => void,
+): boolean {
+  if (!outcome || typeof outcome !== "object") return false;
+  const o = outcome as Record<string, unknown>;
+  if (o.kind !== "summon") return false;
+  const filled = (v: unknown) => typeof v === "string" && v.trim().length > 0;
+  if (!filled(o.project) || !filled(o.task) || !filled(o.cwd)) return false;
+  onSummon(outcome as SummonProposal);
+  return true;
+}
+
 // Fired when audio frames actually start flowing — mic spin-up takes a few
 // hundred ms after toggleTalk, and words spoken before that are lost. UI
 // should not invite the user to speak until this fires.
@@ -208,7 +234,8 @@ async function stopCaptureAndSend() {
   const pcm = Array.from(bytes);
   try {
     if (utteranceInterceptor && (await utteranceInterceptor(pcm))) return;
-    await invoke("process_utterance", { pcm });
+    const outcome = await invoke("process_utterance", { pcm });
+    if (summonHandler) handleUtteranceOutcome(outcome, summonHandler);
   } catch (e) {
     surfaceError(String(e));
   }
