@@ -3,25 +3,27 @@
 // center: above/below the blob and leaning toward the center side.
 
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-import { acquireLarge, releaseLarge } from "./window-frame";
+import { acquireMedium, releaseMedium } from "./window-frame";
 
 const CHAR_MS = 30;
 const HOLD_MS = 3000;
 
 let gen = 0;
 
-// hold the window large while a toast is visible (idle window is too small for it)
+// hold the window open while a toast is visible (idle window is too small for
+// it). Medium, not large: a report is one bubble in the first slot — reports
+// arrive unbidden, so this is what the window sits at most of the time.
 let holding = false;
 function hold() {
   if (!holding) {
     holding = true;
-    acquireLarge();
+    acquireMedium();
   }
 }
 function unhold() {
   if (holding) {
     holding = false;
-    releaseLarge();
+    releaseMedium();
   }
 }
 

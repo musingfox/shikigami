@@ -2,9 +2,12 @@ import { test, expect, beforeEach } from "bun:test";
 import {
   acquireLarge,
   releaseLarge,
+  acquireMedium,
+  releaseMedium,
   currentCenter,
   __isLargeForTest,
   __refsForTest,
+  __sizeForTest,
   __resetFrameForTest,
 } from "../src/window-frame";
 
@@ -40,6 +43,34 @@ test("release below zero clamps at 0 and stays small", async () => {
   await releaseLarge();
   expect(__refsForTest()).toBe(0);
   expect(__isLargeForTest()).toBe(false);
+});
+
+test("a report alone gets the medium frame, not the full ring", async () => {
+  await acquireMedium();
+  expect(__sizeForTest()).toBe("medium");
+  expect(currentCenter()).toEqual({ x: 120, y: 150 });
+  await releaseMedium();
+  expect(__sizeForTest()).toBe("small");
+});
+
+test("large wins while both are held, and falls back to medium not small", async () => {
+  await acquireMedium();
+  await acquireLarge();
+  expect(__sizeForTest()).toBe("large");
+  await releaseLarge(); // confirm dismissed, the toast is still typing
+  expect(__sizeForTest()).toBe("medium");
+  await releaseMedium();
+  expect(__sizeForTest()).toBe("small");
+});
+
+test("acquiring large while medium is held keeps the ring order stable", async () => {
+  await acquireLarge();
+  await acquireMedium();
+  expect(__sizeForTest()).toBe("large"); // medium must not shrink it back
+  await releaseMedium();
+  expect(__sizeForTest()).toBe("large");
+  await releaseLarge();
+  expect(__sizeForTest()).toBe("small");
 });
 
 test("onFrameChange fires after the flag flips (grow and shrink)", async () => {
