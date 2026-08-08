@@ -298,6 +298,14 @@ body {
     0 0 18px var(--ui-pending-glow);
 }
 
+/* 同一個泡泡也拿來當進度指示（錄音中、召喚中）。那不是「等你決定」，所以退回
+   無框族群 —— 琥珀在確認框以外出現一次，它就不再是獨佔色。border-color 留
+   transparent 而不是拿掉 border，版面才不會跳。 */
+#confirm-bar.stage {
+  border-color: transparent;
+  box-shadow: var(--panel-shadow);
+}
+
 #confirm-bar span {
   display: block;
   word-break: break-word;

@@ -14,6 +14,7 @@ import {
   setUtteranceInterceptor,
   toggleTalk,
 } from "./mic";
+import { setBusy, setPending } from "./avatar";
 import { orient, toast } from "./toast";
 import { acquireLarge, releaseLarge } from "./window-frame";
 
@@ -57,8 +58,9 @@ export async function startTargetedTalk(a: AgentEntry) {
   target = { pane: a.pane, name: a.name };
   // words spoken before the mic actually streams are LOST (this clipped
   // leading Chinese and left English-only transcripts) — don't show the red
-  // dot until capture-ready fires
-  showStage("🎙 麥克風準備中…");
+  // dot until capture-ready fires. Warming up carries no information a bubble
+  // could add, so it lives in the orb: 收緊、褪色、快.
+  setBusy(true);
   await toggleTalk();
 }
 
@@ -69,7 +71,7 @@ export async function onUtterance(pcm: number[]): Promise<boolean> {
   const t = target;
   target = null; // one-shot: next utterance is ordinary Q&A again
   try {
-    showStage("辨識中…"); // STT takes a beat — show we heard them
+    setBusy(true); // STT takes a beat — the orb shows it, no bubble needed
     const text = String(await invokeImpl("transcribe_utterance", { pcm })).trim();
     if (!text) {
       hideConfirm();
@@ -103,6 +105,8 @@ function showStage(text: string, buttonText?: string, onButton?: () => void) {
     actions.appendChild(btn);
     el.appendChild(actions);
   }
+  el.classList.add("stage"); // 只是在說話 —— 無框，不帶琥珀
+  setPending(false);
   reveal(el);
 }
 
@@ -116,14 +120,25 @@ function confirmEl(): HTMLDivElement {
   return el;
 }
 
-// Grow the window and settle the outer ring's direction BEFORE revealing, or
-// the bubble pops in below the orb and jumps above a frame later. While it is
-// up the status dots stop intercepting the mouse: .flip puts the middle dot
+// A decision, not a status line: the orb wears the amber ring and drops busy —
+// this moment is not the system working, it is the system waiting.
+// The dots stop intercepting the mouse only here: .flip puts the middle dot
 // right on top of the "✓ 送出" row and dots (z 930) sit above the ring (900).
+// A stage bubble must leave them clickable — clicking a dot mid-capture is how
+// you end the capture.
+function decide(el: HTMLElement) {
+  el.classList.remove("stage");
+  setBusy(false);
+  setPending(true);
+  document.body.classList.add("confirm-open");
+  reveal(el);
+}
+
+// Grow the window and settle the outer ring's direction BEFORE revealing, or
+// the bubble pops in below the orb and jumps above a frame later.
 function reveal(el: HTMLElement) {
   if (!confirmShown) {
     confirmShown = true;
-    document.body.classList.add("confirm-open");
     Promise.all([acquireLarge(), orient()]).then(() => el.classList.add("show"));
   } else {
     orient();
@@ -179,7 +194,7 @@ function showConfirm(t: Target, text: string) {
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
   }, 0);
-  reveal(el);
+  decide(el);
 }
 
 function inject(t: Target, text: string) {
@@ -217,6 +232,7 @@ export async function confirmSummon(task: string): Promise<void> {
   if (testMode) testSummonSends.push({ cmd: "summon_agent", args });
   // the chain (tab.create → agent.start → wait → prompt) takes ~10s; keep the
   // bubble up so the window isn't silently idle-looking meanwhile
+  setBusy(true);
   showStage(`⚡ 召喚 ${p.project} 中…`);
   try {
     await invokeImpl("summon_agent", args);
@@ -273,7 +289,7 @@ function showSummonConfirm(p: SummonProposal) {
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
   }, 0);
-  reveal(el);
+  decide(el);
 }
 
 function hideConfirm() {
@@ -281,8 +297,11 @@ function hideConfirm() {
     confirmShown = false;
     return;
   }
+
   document.getElementById("confirm-bar")?.classList.remove("show");
   document.body.classList.remove("confirm-open");
+  setBusy(false);
+  setPending(false);
   if (confirmShown) {
     confirmShown = false;
     releaseLarge();
@@ -294,6 +313,9 @@ export function initCommand() {
   setSummonHandler(onSummonProposal);
   setCaptureReadyListener((ready) => {
     if (ready && target) {
+      // keeps its bubble: 對誰說話 only exists here, and speaking blind is
+      // worse than one more element on screen (§8.1)
+      setBusy(false);
       showStage(`🔴 對 ${target.name} 說話中…`, "■ 結束", () => { toggleTalk(); });
     }
   });
