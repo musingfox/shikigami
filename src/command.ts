@@ -140,7 +140,8 @@ function showConfirm(t: Target, text: string) {
   input.rows = 2;
   const autosize = () => {
     input.style.height = "auto";
-    input.style.height = `${Math.min(input.scrollHeight, 100)}px`;
+    // 64 = 3 行（12px × 1.5 ＋ 內距）；248px 寬下那是 55 個中文字
+    input.style.height = `${Math.min(input.scrollHeight, 64)}px`;
   };
   input.oninput = autosize;
   const actions = document.createElement("div");
@@ -242,7 +243,8 @@ function showSummonConfirm(p: SummonProposal) {
   input.rows = 2;
   const autosize = () => {
     input.style.height = "auto";
-    input.style.height = `${Math.min(input.scrollHeight, 100)}px`;
+    // 64 = 3 行（12px × 1.5 ＋ 內距）；248px 寬下那是 55 個中文字
+    input.style.height = `${Math.min(input.scrollHeight, 64)}px`;
   };
   input.oninput = autosize;
   const actions = document.createElement("div");

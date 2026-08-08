@@ -270,7 +270,10 @@ body.menu-open #roster-label {
   position: absolute;
   top: calc(50% + var(--aura-gap));
   left: calc(50% - 20px);
-  max-width: 170px;
+  /* 唯一比 --bubble-max 寬的面板：它是唯一「必須讀完」的。large 視窗有 320px
+     寬，176 之外的 136px 從來沒被用到；加寬到 248 讓 3 行從 37 字撐到 55 字，
+     高度與視窗尺寸都不動。 */
+  max-width: 248px;
   padding: var(--sp-3) var(--sp-4);
   border-radius: var(--r-panel);
   background: var(--panel-bg);
@@ -351,7 +354,7 @@ body.menu-open #roster-label {
   left: 0;
   top: 0;
   width: 320px;
-  height: 360px;
+  height: 592px;
   pointer-events: none;
   z-index: var(--z-menu); /* above toast per contract */
 }

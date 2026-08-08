@@ -21,36 +21,36 @@ import {
 } from "../src/menu";
 import { __resetFrameForTest } from "../src/window-frame";
 
-// FanLayout contract tests（ring=96, center 160/180, step 40°, 扇形對準 centerDeg）
-test("T1: given fanPositions(1, -90) -> expect [{x:160,y:84}] ±0.5", () => {
+// FanLayout contract tests（ring=96, center 160/296, step 40°, 扇形對準 centerDeg）
+test("T1: given fanPositions(1, -90) -> expect [{x:160,y:200}] ±0.5", () => {
   const pos = fanPositions(1, -90);
   expect(pos.length).toBe(1);
   expect(pos[0].x).toBeCloseTo(160, 1);
-  expect(pos[0].y).toBeCloseTo(84, 1);
+  expect(pos[0].y).toBeCloseTo(200, 1);
 });
 
-test("T2: given fanPositions(3, -90) -> expect 中項 {x:160,y:84} ±0.5，1/3 項對 x=160 鏡像", () => {
+test("T2: given fanPositions(3, -90) -> expect 中項 {x:160,y:200} ±0.5，1/3 項對 x=160 鏡像", () => {
   const pos = fanPositions(3, -90);
   expect(pos.length).toBe(3);
   expect(pos[1].x).toBeCloseTo(160, 1);
-  expect(pos[1].y).toBeCloseTo(84, 1);
+  expect(pos[1].y).toBeCloseTo(200, 1);
   expect(pos[0].x - 160).toBeCloseTo(-(pos[2].x - 160), 1);
   expect(pos[0].y).toBeCloseTo(pos[2].y, 1);
 });
 
-test("T3: given fanPositions(3, 0)（螢幕中心在正右方） -> expect 中項 {x:256,y:180} ±0.5", () => {
+test("T3: given fanPositions(3, 0)（螢幕中心在正右方） -> expect 中項 {x:256,y:296} ±0.5", () => {
   const pos = fanPositions(3, 0);
   expect(pos[1].x).toBeCloseTo(256, 1);
-  expect(pos[1].y).toBeCloseTo(180, 1);
+  expect(pos[1].y).toBeCloseTo(296, 1);
 });
 
 test("T4: given fanPositions(n, deg) n∈1..5, deg∈{-90,-45,0,90,135,180} -> expect 每點距中心恰 96、相鄰夾角 45°", () => {
   for (const deg of [-90, -45, 0, 90, 135, 180]) {
     for (let n = 1; n <= 5; n++) {
       const pos = fanPositions(n, deg);
-      const angles = pos.map((p) => Math.atan2(p.y - 180, p.x - 160) * (180 / Math.PI));
+      const angles = pos.map((p) => Math.atan2(p.y - 296, p.x - 160) * (180 / Math.PI));
       for (let i = 0; i < n; i++) {
-        const r = Math.hypot(pos[i].x - 160, pos[i].y - 180);
+        const r = Math.hypot(pos[i].x - 160, pos[i].y - 296);
         expect(r).toBeCloseTo(96, 1);
         if (i > 0) {
           let d = angles[i] - angles[i - 1];
@@ -313,21 +313,21 @@ test("T3: given 選單關 → onMutedEvent(false) -> expect 僅快取更新、�
 });
 
 // OrbHitTest contract tests (center passed explicitly = large-window center)
-const C = { x: 160, y: 180 };
-test("T1: given isOrbHit(160, 180) -> expect true", () => {
+const C = { x: 160, y: 296 };
+test("T1: given isOrbHit(160, 296) -> expect true", () => {
   resetTestRecords();
   __setTestModeForTest(true);
-  expect(isOrbHit(160, 180, C)).toBe(true);
+  expect(isOrbHit(160, 296, C)).toBe(true);
 });
 
 test("T2: given isOrbHit(10, 10) -> expect false", () => {
   expect(isOrbHit(10, 10, C)).toBe(false);
 });
 
-test("T3: given isOrbHit(160, 132) — 距中心恰 48 -> expect true（邊界含）", () => {
-  expect(isOrbHit(160, 132, C)).toBe(true);
+test("T3: given isOrbHit(160, 248) — 距中心恰 48 -> expect true（邊界含）", () => {
+  expect(isOrbHit(160, 248, C)).toBe(true);
 });
 
-test("T4: given isOrbHit(160, 131) — 距中心 49 -> expect false", () => {
-  expect(isOrbHit(160, 131, C)).toBe(false);
+test("T4: given isOrbHit(160, 247) — 距中心 49 -> expect false", () => {
+  expect(isOrbHit(160, 247, C)).toBe(false);
 });
