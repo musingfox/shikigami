@@ -17,11 +17,11 @@ test("idle center is the small-window center 88/88", () => {
   expect(__isLargeForTest()).toBe(false);
 });
 
-test("acquireLarge grows to large center 160/180, ref 1", async () => {
+test("acquireLarge grows to large center 160/296, ref 1", async () => {
   await acquireLarge();
   expect(__isLargeForTest()).toBe(true);
   expect(__refsForTest()).toBe(1);
-  expect(currentCenter()).toEqual({ x: 160, y: 180 });
+  expect(currentCenter()).toEqual({ x: 160, y: 296 });
 });
 
 test("nested acquire holds large until refs return to 0", async () => {

@@ -9,7 +9,9 @@ import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api
 // 176: leaves ~13px of breathing room past the roster arc so dock-magnified
 // bubbles don't clip at the window edge
 const SMALL = { w: 176, h: 176, cx: 88, cy: 88 };
-const LARGE = { w: 320, h: 360, cx: 160, cy: 180 };
+// 592: the outer ring needs 中心到邊 = 錨點 64 + 確認框 120 + gap 8 + 報告 66
+// + gap 8 + 名牌 20 = 286；取 296 留餘裕後 ×2。三個泡泡同時在場才不會被裁掉。
+const LARGE = { w: 320, h: 592, cx: 160, cy: 296 };
 
 let large = false;
 let refs = 0;

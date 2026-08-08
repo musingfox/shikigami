@@ -55,7 +55,7 @@ const EDGE = 10; // keep box + glow inside the window
 export function fanPositions(
   n: number,
   centerDeg: number,
-  center: { x: number; y: number } = { x: 160, y: 180 },
+  center: { x: number; y: number } = { x: 160, y: 296 },
 ): { x: number; y: number }[] {
   if (n <= 0) return [];
   const start = centerDeg - (FAN_STEP * (n - 1)) / 2;
