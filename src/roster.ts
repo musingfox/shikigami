@@ -18,7 +18,7 @@ import {
   type AgentStatusChange,
 } from "./events";
 import { startTargetedTalk } from "./command";
-import { toast } from "./toast";
+import { orient, toast } from "./toast";
 import { currentCenter, onFrameChange } from "./window-frame";
 
 export const ATTRIBUTION_WINDOW_MS = 30_000;
@@ -129,9 +129,10 @@ function labelEl(): HTMLDivElement {
   return el;
 }
 
-// Fixed caption slot under the orb (CSS-positioned) — showing it never moves
-// the bubbles, and long names just ellipsize inside the window. Selecting a
-// bubble makes it sticky and appends the action buttons (R1.5).
+// Outermost slot of the #aura stack — showing it never moves what is already
+// there, and long names just ellipsize inside the window. It must not grow the
+// window: hover is high-frequency and a resize would re-arc the dots under the
+// cursor. Selecting a bubble makes it sticky and appends the action buttons.
 function showLabel(a: AgentEntry, sticky = false) {
   const el = labelEl();
   el.innerHTML = "";
@@ -156,6 +157,7 @@ function showLabel(a: AgentEntry, sticky = false) {
     el.append(jump, talk);
   }
   el.classList.toggle("selected", sticky);
+  orient(); // dragging changes the answer and never fires onFrameChange
   el.classList.add("show");
 }
 

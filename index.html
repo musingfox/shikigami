@@ -11,6 +11,13 @@
   <!-- #orb has NO drag-region: main.ts routes left mousedown — double-click (detail===2) = talk, single press+hold = immediate startDragging() (skipped while the menu is open). Cmd+Ctrl+M push-to-talk still works too. -->
   <body data-tauri-drag-region>
     <canvas id="orb"></canvas>
-    <div id="toast" data-tauri-drag-region></div>
+    <!-- 外圈：DOM 順序即由 orb 往外的堆疊順序（確認框最貼身 → 報告 → 名牌）。
+         隱藏的 slot 靠 display:none 塌陷，所以三者可以同時在場而不互相推擠。
+         方向由 toast.ts 的 orient() 掛在容器上，見 DESIGN.md §2.1–§2.2。 -->
+    <div id="aura">
+      <div id="confirm-bar"></div>
+      <div id="toast" data-tauri-drag-region></div>
+      <div id="roster-label"></div>
+    </div>
   </body>
 </html>

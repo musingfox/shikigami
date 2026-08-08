@@ -25,7 +25,14 @@ function unhold() {
   }
 }
 
-async function place(el: HTMLElement) {
+// The whole outer ring shares one direction, so the two classes live on the
+// #aura container and every slot inherits them. Recomputed at each show, NOT
+// on onFrameChange: dragging the window changes the answer and dragging only
+// moves the window, it never flips the size flag.
+export async function orient() {
+  if (typeof document === "undefined") return;
+  const el = document.getElementById("aura");
+  if (!el) return;
   try {
     const win = getCurrentWindow();
     const [pos, size, mon] = await Promise.all([
@@ -38,10 +45,10 @@ async function place(el: HTMLElement) {
     const wcy = pos.y + size.height / 2;
     const scx = mon.position.x + mon.size.width / 2;
     const scy = mon.position.y + mon.size.height / 2;
-    el.classList.toggle("above", wcy > scy); // avatar below center → bubble above
+    el.classList.toggle("flip", wcy > scy); // avatar below center → grow upward
     el.classList.toggle("lean-left", scx < wcx);
   } catch {
-    // default placement (below, centered)
+    // default placement (below, leaning right)
   }
 }
 
@@ -50,7 +57,7 @@ export function toast(text: string) {
   const my = ++gen;
   el.textContent = "";
   hold();
-  place(el).then(() => {
+  orient().then(() => {
     if (my !== gen) return;
     el.classList.add("show");
     let i = 0;
