@@ -1,0 +1,197 @@
+/* ============================================================================
+   shikigami — 設計 token
+   直接貼進 src/styles.css 的最上方，取代現有散落的硬編值。
+   兩條不可違反的規則：
+     1. 冷色與無彩 = 狀態軸（agent 的狀態），只出現在狀態點與 orb。
+     2. 暖色       = 介面軸（你的事），只出現在可操作物。
+   兩軸不共用色相。綠色 #34d399 整組退出系統 —— 它正是撞車的來源。
+   ============================================================================ */
+
+:root {
+  /* ══════════ 狀態軸 ══════════════════════════════════════════════════════
+     只用於 .roster-dot 與 orb。四種狀態同時靠色相、明度、動態、實心／中空
+     四個維度分開，任一維度失效仍剩三個。 */
+  --st-idle:     oklch(64% 0.005 250);   /* #9ba1a8  無彩灰 · 不呼吸 · 縮 0.72 */
+  --st-working:  oklch(78% 0.130 200);   /* #40d3e8  青    · 呼吸 3.2s · 實心 */
+  --st-blocked:  oklch(68% 0.200 335);   /* #ef5cc4  品紅  · 心跳 1.6s · 中空環 */
+  --st-done:     oklch(89% 0.050 235);   /* #c9e3f7  冷白  · 靜止 · 最亮 */
+
+  /* ══════════ 介面軸 ══════════════════════════════════════════════════════
+     琥珀是「等你決定」的獨佔色。它出現在確認框以外的任何地方都是錯誤。 */
+  --ui-fg:       oklch(93% 0 0);         /* #e9e9e9  可點（靜） */
+  --ui-fg-dim:   oklch(72% 0 0);         /* #aeaeae  次要文字 */
+  --ui-hot:      oklch(100% 0 0);        /* #ffffff  hover / focus */
+  --ui-pending:  oklch(80% 0.150 78);    /* #f4b23c  待你決定 — 只有確認框 */
+  --ui-danger:   oklch(64% 0.190 32);    /* #ef6a4a  危險 — 只有選單的 Close */
+
+  /* ══════════ 面板 ═══════════════════════════════════════════════════════
+     背景不可預測（白文件／黑終端／彩色桌布）。深底負責讓顏色與背景脫鉤。
+
+     面板家族只有兩種，靠「有沒有框」分：
+       無框 = 只是在說話（報告泡泡、名牌）→ --panel-shadow
+       有框 = 可操作（確認框、選單、動作鈕）→ 自己加 --edge-in 或琥珀框
+     所以「看得到框」在畫面上永遠等於「這裡有你的事」。 */
+  --panel-bg:    rgba(12, 14, 19, 0.90);
+  --panel-blur:  10px;
+  --edge-in:     rgba(255, 255, 255, 0.16);   /* 框線 —— 只給可操作的面板 */
+  --edge-out:    rgba(0, 0, 0, 0.52);         /* 外暗邊：白文件上分離，讀作陰影 */
+  --lit:         rgba(255, 255, 255, 0.10);   /* 頂緣受光：黑底上浮起，不是一圈框 */
+  --panel-shadow:
+    inset 0 1px 0 var(--lit),
+    0 0 0 1px var(--edge-out),
+    0 10px 22px rgba(0, 0, 0, 0.40);
+  --dot-ring:    0 0 0 1.5px rgba(0, 0, 0, 0.55);  /* 小色點自帶的隔離環 */
+
+  /* ══════════ 排版階梯 ═══════════════════════════════════════════════════
+     不在這幾組值裡的數字就是錯的。 */
+  --f-micro: 10px;  --f-label: 11px;  --f-body: 12px;  --f-head: 13px;
+  --lh-flat: 1;     --lh-tight: 1.35; --lh-read: 1.5;
+  --r-ctl:   4px;   --r-panel: 8px;   --r-round: 999px;
+  --sp-1: 2px; --sp-2: 4px; --sp-3: 6px; --sp-4: 8px; --sp-5: 12px; --sp-6: 16px;
+  --ls-label: 0.02em;   /* 小字標籤 */
+  --ls-caps:  0.08em;   /* 全大寫選單 — 等寬全大寫沒有正字距會擠成一團 */
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* ══════════ 彈出 —— 泡泡與放射選單共用同一條曲線 ══════════════════════ */
+  --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-pop:  220ms;
+
+  /* ══════════ 幾何 ══════════════════════════════════════════════════════ */
+  --arc-r:      66px;   /* 狀態點弧半徑（不變） */
+  --dot-hit:    20px;   /* 點擊區（不變） */
+  --dot-vis:    12px;   /* 可見圓徑（不變） */
+  --aura-gap:   64px;   /* 外圈容器錨點：距視窗中心 */
+  --aura-inset:  8px;   /* 容器左右內縮 */
+  --bubble-max: 176px;  /* 泡泡最大寬 */
+
+  /* ══════════ 層級 — 只有三個值 ═════════════════════════════════════════ */
+  --z-aura: 900;   /* 外圈：確認框 → 報告 → 名牌，同一容器 */
+  --z-dots: 930;   /* 狀態點：壓在泡泡之上，永遠可 hover */
+  --z-menu: 1000;  /* 放射選單：唯一壓住一切的層 */
+}
+
+/* ============================================================================
+   位置契約 — 取代 #toast / #confirm-bar / #roster-label 三組各自為政的座標。
+   三者移進同一個 #aura 容器，DOM 順序即由 orb 往外的堆疊順序：
+       <div id="aura">
+         <div id="confirm-bar">…</div>   slot 1  最貼 orb，主位
+         <div id="toast">…</div>         slot 2
+         <div id="roster-label">…</div>  slot 3  最外
+       </div>
+   名牌放最外，是因為它由 hover 驅動、頻率最高 —— 放最外，它的出現就永遠
+   不會推動已經在場的東西。
+   ============================================================================ */
+
+#aura {
+  position: absolute;
+  left: var(--aura-inset);
+  right: var(--aura-inset);
+  top: calc(50% + var(--aura-gap));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;          /* 視窗在螢幕左半 → 泡泡靠右，朝中心 */
+  gap: var(--sp-4);
+  z-index: var(--z-aura);
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+
+/* 方向邏輯只剩這兩個 class。四套規則收成一套。 */
+#aura.flip {                      /* 視窗中心 y > 螢幕中心 y → 朝上長 */
+  top: auto;
+  bottom: calc(50% + var(--aura-gap));
+  flex-direction: column-reverse;
+}
+#aura.lean-left {                 /* 視窗中心 x > 螢幕中心 x → 靠左，朝中心 */
+  align-items: flex-start;
+}
+
+#aura > * {
+  max-width: var(--bubble-max);
+  border-radius: var(--r-panel);
+  background: var(--panel-bg);
+  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  box-shadow: var(--panel-shadow);
+  color: var(--ui-fg);
+  font: var(--f-body) / var(--lh-read) var(--mono);
+  /* 從離 orb 最近的那個角長出來 —— 與放射選單同一套彈出語彙 */
+  transform-origin: top left;
+}
+#aura.lean-left > *      { transform-origin: top right; }
+#aura.flip > *           { transform-origin: bottom left; }
+#aura.flip.lean-left > * { transform-origin: bottom right; }
+
+/* 隱藏的 slot 塌陷，不留空洞 —— 這是「三者可同時出現」得以成立的機制 */
+#aura > :not(.show) { display: none; }
+/* 用 animation 而非 transition：slot 靠 display:none 塌陷，而 display 的變化
+   會吃掉 transition。animation 在元素第一次算出版面時就會跑。 */
+#aura > .show {
+  pointer-events: auto;
+  animation: bubble-pop var(--dur-pop) var(--ease-pop) both;
+}
+@keyframes bubble-pop {
+  from { opacity: 0; transform: scale(0.34); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* ============================================================================
+   確認框加寬 — 唯一「必須讀完」的面板，所以唯一比 --bubble-max 寬的
+   large 視窗有 320px 寬，原本 176 之外的 136px 從來沒用到。加寬到 248 後
+   3 行從 37 個中文字撐到 55 個（+49%），而高度與視窗尺寸完全不動。
+   報告泡泡與名牌維持 176 —— 「要讀完的」比「只是在說話的」寬，這是階層。
+   ============================================================================ */
+#confirm-bar {
+  max-width: 248px;
+}
+
+/* ============================================================================
+   名牌動作鈕 — 唯一有明確尺寸的有框控制項，所以唯一會被 box-sizing 咬到
+   shikigami 的 styles.css 沒有全域 `*` reset，預設 content-box。不明寫的話
+   16×16 會變 18×18，名牌 row 從 20 撐到 24，idle 視窗的 4px 餘裕歸零、落影被裁。
+   （確認框與選單按鈕是 auto 高度，狀態點用 inset 不用 border，都不受影響。）
+   row = max(11 × 1.35, 16) + 內距 4 = 20px，正是 §5.3 的預算。名牌不得放大視窗
+   —— hover 是高頻行為，放大會讓弧依新中心重算而跳位。
+   ============================================================================ */
+#roster-label button {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+/* ============================================================================
+   互斥規則 — 只有兩條，明列於此而非散落在各模組
+   ============================================================================ */
+body.menu-open #roster-strip { opacity: 0; pointer-events: none; }
+body.menu-open #aura {
+  opacity: 0.32;                  /* 不隱藏：讓人知道東西還在，只是被壓住 */
+  pointer-events: none;
+  filter: saturate(0.4);
+}
+/* 確認框開啟時 orb 退出 busy 動態（由 avatar.ts setBusy(false) 執行）：
+   此刻該動的是使用者，不是系統。 */
+
+/* ============================================================================
+   動態關閉 — 見 DESIGN.md §4.2
+   這套設計用呼吸／心跳／彈出承載語意，是最容易被系統設定整組拿掉的維度。
+   降級靠「尺寸階梯 0.72 / 0.85 / 1.00 ＋ 實心／中空 ＋ 明度」補上：
+   done 從 1.00 收到 0.85，否則動態關閉後 working 與 done 只剩 35° 色相差。
+   orb 是 canvas，avatar.ts 需自行讀 matchMedia 把 kSpeed 鎖 0、音量項 0.12 減半。
+   ============================================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .roster-dot::before { animation: none !important; }
+  .roster-dot[data-status="working"]::before { transform: scale(1); }
+  .roster-dot[data-status="done"]::before    { transform: scale(0.85); }
+  #aura > .show { animation: aura-fade 120ms linear both; }
+  #radial-menu button[role="menuitem"] { transition: opacity 120ms linear; }
+}
+@keyframes aura-fade { from { opacity: 0 } to { opacity: 1 } }
+
+/* ============================================================================
+   放射選單 —— 與泡泡共用彈出曲線。#radial-menu 的 transition 換成 token：
+     transition: transform var(--dur-pop) var(--ease-pop), opacity 160ms ease;
+   選單保留 1px var(--edge-in) 白框（它是可操作的），落影對齊 --panel-shadow 的
+   後兩項：0 0 0 1px var(--edge-out), 0 10px 22px rgba(0,0,0,.40)。
+   menu.ts 逐項 50ms × i 的 stagger 不變。
+   ============================================================================ */
