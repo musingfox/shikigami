@@ -424,3 +424,19 @@ body.menu-open #aura > * { pointer-events: none; }
    動作列上，而點的層級（930）高於外圈（900）。只停 pointer-events 不隱藏 ——
    誰在工作仍然看得見，只是此刻該按的是確認框。 */
 body.confirm-open .roster-dot { pointer-events: none; }
+
+/* ============================================================================
+   動態關閉（DESIGN.md §4.2）—— 這套設計用呼吸／心跳／彈出承載語意，是四個
+   辨識維度裡最容易被系統設定整組拿掉的一個。降級靠「尺寸階梯 0.72 / 0.85 /
+   1.00 ＋ 實心／中空 ＋ 明度」補上：done 從 1.00 收到 0.85，否則動態關掉後
+   working 與 done 只剩 35° 色相差。
+   orb 是 canvas，避不開 CSS，降級寫在 avatar.ts 的 REDUCED 裡。
+   ============================================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .roster-dot::before { animation: none !important; }
+  .roster-dot[data-status="working"]::before { transform: scale(1); }
+  .roster-dot[data-status="done"]::before { transform: scale(0.85); }
+  #aura > .show { animation: aura-fade 120ms linear both; }
+  #radial-menu button[role="menuitem"] { transition: opacity 120ms linear; }
+}
+@keyframes aura-fade { from { opacity: 0; } to { opacity: 1; } }
