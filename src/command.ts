@@ -14,7 +14,7 @@ import {
   setUtteranceInterceptor,
   toggleTalk,
 } from "./mic";
-import { toast } from "./toast";
+import { orient, toast } from "./toast";
 import { acquireLarge, releaseLarge } from "./window-frame";
 
 type Target = { pane: string; name: string };
@@ -103,12 +103,7 @@ function showStage(text: string, buttonText?: string, onButton?: () => void) {
     actions.appendChild(btn);
     el.appendChild(actions);
   }
-  if (!confirmShown) {
-    confirmShown = true;
-    acquireLarge().then(() => el.classList.add("show"));
-  } else {
-    el.classList.add("show");
-  }
+  reveal(el);
 }
 
 function confirmEl(): HTMLDivElement {
@@ -119,6 +114,21 @@ function confirmEl(): HTMLDivElement {
     document.body.appendChild(el);
   }
   return el;
+}
+
+// Grow the window and settle the outer ring's direction BEFORE revealing, or
+// the bubble pops in below the orb and jumps above a frame later. While it is
+// up the status dots stop intercepting the mouse: .flip puts the middle dot
+// right on top of the "✓ 送出" row and dots (z 930) sit above the ring (900).
+function reveal(el: HTMLElement) {
+  if (!confirmShown) {
+    confirmShown = true;
+    document.body.classList.add("confirm-open");
+    Promise.all([acquireLarge(), orient()]).then(() => el.classList.add("show"));
+  } else {
+    orient();
+    el.classList.add("show");
+  }
 }
 
 // Toast-style bubble (multi-line, full text visible), amber accent. Holds the
@@ -169,12 +179,7 @@ function showConfirm(t: Target, text: string) {
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
   }, 0);
-  if (!confirmShown) {
-    confirmShown = true;
-    acquireLarge().then(() => el.classList.add("show"));
-  } else {
-    el.classList.add("show");
-  }
+  reveal(el);
 }
 
 function inject(t: Target, text: string) {
@@ -268,12 +273,7 @@ function showSummonConfirm(p: SummonProposal) {
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
   }, 0);
-  if (!confirmShown) {
-    confirmShown = true;
-    acquireLarge().then(() => el.classList.add("show"));
-  } else {
-    el.classList.add("show");
-  }
+  reveal(el);
 }
 
 function hideConfirm() {
@@ -282,6 +282,7 @@ function hideConfirm() {
     return;
   }
   document.getElementById("confirm-bar")?.classList.remove("show");
+  document.body.classList.remove("confirm-open");
   if (confirmShown) {
     confirmShown = false;
     releaseLarge();

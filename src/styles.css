@@ -91,18 +91,38 @@ body {
   transition: opacity 0.4s ease;
 }
 
-/* bubble sits diagonally between the avatar and the screen center:
-   .above flips it over the blob, .lean-left mirrors it horizontally,
-   so its quadrant always faces the center.
-   無框（深底＋頂緣受光＋外暗邊）—— 它只是在說話，不是可以按的東西。 */
-#toast {
+/* ============================================================================
+   外圈 —— 取代 #toast / #confirm-bar / #roster-label 三組各自為政的座標。
+   三者是同一個 flex 容器的 slot，DOM 順序即由 orb 往外的堆疊順序；隱藏的
+   slot 靠 display:none 塌陷不留空洞，這是「三者可同時出現」得以成立的機制。
+   名牌放最外，因為它由 hover 驅動、頻率最高 —— 放最外，它的出現就永遠不會
+   推動已經在場的東西。方向邏輯只剩 .flip / .lean-left 兩個 class，由
+   toast.ts 的 orient() 在每次要顯示時掛上（見 DESIGN.md §2.1–§2.3）。
+   ============================================================================ */
+#aura {
   position: absolute;
+  left: var(--aura-inset);
+  right: var(--aura-inset);
   top: calc(50% + var(--aura-gap));
-  left: calc(50% - 20px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end; /* 視窗在螢幕左半 → 泡泡靠右，朝中心 */
+  gap: var(--sp-4);
+  z-index: var(--z-aura);
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+#aura.flip {              /* 視窗中心 y > 螢幕中心 y → 朝上長 */
+  top: auto;
+  bottom: calc(50% + var(--aura-gap));
+  flex-direction: column-reverse;
+}
+#aura.lean-left {         /* 視窗中心 x > 螢幕中心 x → 靠左，朝中心 */
+  align-items: flex-start;
+}
+
+#aura > * {
   max-width: var(--bubble-max);
-  max-height: 66px; /* 3 行 × 18px（12 × 1.5）＋ 上下內距 12 */
-  overflow: hidden;
-  padding: var(--sp-3) var(--sp-4);
   border-radius: var(--r-panel);
   background: var(--panel-bg);
   -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
@@ -110,22 +130,31 @@ body {
   box-shadow: var(--panel-shadow);
   color: var(--ui-fg);
   font: var(--f-body) / var(--lh-read) var(--mono);
-  opacity: 0;
-  transition: opacity 0.4s ease;
+  /* 從離 orb 最近的那個角長出來 —— 與放射選單同一套彈出語彙 */
+  transform-origin: top left;
+}
+#aura.lean-left > *      { transform-origin: top right; }
+#aura.flip > *           { transform-origin: bottom left; }
+#aura.flip.lean-left > * { transform-origin: bottom right; }
+
+#aura > :not(.show) { display: none; }
+/* 用 animation 而非 transition：slot 靠 display:none 塌陷，而 display 的變化
+   會吃掉 transition。animation 在元素第一次算出版面時就會跑（CSS Animations
+   Level 2 明文保證），少賭一次 webview 版本。 */
+#aura > .show {
+  pointer-events: auto;
+  animation: bubble-pop var(--dur-pop) var(--ease-pop) both;
+}
+@keyframes bubble-pop {
+  from { opacity: 0; transform: scale(0.34); }
+  to   { opacity: 1; transform: scale(1); }
 }
 
-#toast.above {
-  top: auto;
-  bottom: calc(50% + var(--aura-gap));
-}
-
-#toast.lean-left {
-  left: auto;
-  right: calc(50% - 20px);
-}
-
-#toast.show {
-  opacity: 1;
+/* 報告泡泡：無框（深底＋頂緣受光＋外暗邊）—— 它只是在說話，不是可以按的東西 */
+#toast {
+  max-height: 66px; /* 3 行 × 18px（12 × 1.5）＋ 上下內距 12 */
+  overflow: hidden;
+  padding: var(--sp-3) var(--sp-4);
 }
 /* roster bubbles: one breathing status bubble per observed agent, arced
    around the orb's rim (positions computed in roster.ts). Each button is a
@@ -135,12 +164,7 @@ body {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  z-index: 900; /* under menu (1000); transient toast overlap is fine */
-}
-
-body.menu-open #roster-strip,
-body.menu-open #roster-label {
-  display: none;
+  z-index: var(--z-dots); /* 壓在泡泡（900）之上，永遠可 hover */
 }
 
 .roster-dot {
@@ -217,32 +241,18 @@ body.menu-open #roster-label {
 /* hover label: fixed caption slot under the orb — appearing never disturbs
    the bubbles, and long names ellipsize inside the window. When a bubble is
    click-selected it turns sticky and gains action buttons (↗ jump / 🎙 talk).
-   無框 —— 它只是在說話。 */
+   無框 —— 它只是在說話。堆疊在最外圈，出現時不會推動已經在場的東西。 */
 #roster-label {
-  position: fixed;
-  top: calc(50% + 62px);
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: calc(100% - 12px);
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-3);
-  border-radius: var(--r-panel);
-  background: var(--panel-bg);
-  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
-  backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
-  box-shadow: var(--panel-shadow);
-  color: var(--ui-fg);
   font: var(--f-micro) / var(--lh-tight) var(--mono);
   letter-spacing: var(--ls-label);
-  opacity: 0;
-  transition: opacity 120ms ease;
-  pointer-events: none;
-  z-index: 950;
 }
-#roster-label.show { opacity: 1; }
-#roster-label.selected { pointer-events: auto; }
+/* hover 態只是在說話，不該攔滑鼠；選取態才要能按到動作鈕。
+   （比 `#aura > .show` 多一個 id，穩定勝出。） */
+#aura > #roster-label:not(.selected) { pointer-events: none; }
 
 #roster-label span {
   overflow: hidden;
@@ -250,15 +260,22 @@ body.menu-open #roster-label {
   white-space: nowrap;
 }
 
-/* 動作鈕：可操作 → 白細框（§2.5） */
+/* 動作鈕：可操作 → 白細框（§2.5）。
+   box-sizing 必須明寫 —— 這份 styles.css 沒有全域 `*` reset，預設 content-box，
+   16px ＋ 1px border 會算成 18px，名牌 row 從 20 撐到 24，176 視窗的 4px 餘裕
+   歸零、落影被裁。名牌不得放大視窗：hover 是高頻行為，放大會讓弧依新中心重算
+   而跳位。 */
 #roster-label button {
   flex: none;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  padding: 0;
   border: 1px solid var(--edge-in);
   border-radius: var(--r-ctl);
   background: transparent;
   color: var(--ui-fg);
   font: var(--f-micro) / var(--lh-flat) var(--mono);
-  padding: var(--sp-1) var(--sp-2);
   cursor: pointer;
 }
 #roster-label button:hover { border-color: var(--ui-hot); color: var(--ui-hot); }
@@ -267,33 +284,18 @@ body.menu-open #roster-label {
    deep panel as everything else — 琥珀只在框與外暈上，是全系統唯一有框的說話
    面板。內文用 --ui-fg，對比度表（§1.3）就是對這個底量的。 */
 #confirm-bar {
-  position: absolute;
-  top: calc(50% + var(--aura-gap));
-  left: calc(50% - 20px);
   /* 唯一比 --bubble-max 寬的面板：它是唯一「必須讀完」的。large 視窗有 320px
      寬，176 之外的 136px 從來沒被用到；加寬到 248 讓 3 行從 37 字撐到 55 字，
-     高度與視窗尺寸都不動。 */
-  max-width: 248px;
+     高度與視窗尺寸都不動。明寫 width 而非只放寬上限：flex item 是 shrink-to-fit，
+     只給 max-width 的話寬度會停在 textarea 的內建寬，那 136px 還是沒用到。 */
+  width: 248px;
+  max-width: 100%;
   padding: var(--sp-3) var(--sp-4);
-  border-radius: var(--r-panel);
-  background: var(--panel-bg);
-  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
-  backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
   border: 1px solid var(--ui-pending);
   box-shadow:
     inset 0 1px 0 var(--lit),
     0 0 0 1px var(--edge-out),
     0 0 18px var(--ui-pending-glow);
-  color: var(--ui-fg);
-  font: var(--f-body) / var(--lh-read) var(--mono);
-  opacity: 0;
-  transition: opacity 120ms ease;
-  pointer-events: none;
-  z-index: 960;
-}
-#confirm-bar.show {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 #confirm-bar span {
@@ -397,3 +399,20 @@ body.menu-open #roster-label {
   transition: opacity 80ms ease;
   opacity: 0;
 }
+
+/* ============================================================================
+   互斥規則（DESIGN.md §2.4）—— 只有三條，明列於此而非散落在各模組。
+   pointer-events 會被子元素的 auto 覆蓋（它是繼承屬性），所以每條都必須點名
+   .roster-dot / #aura > *，只關掉容器是關不掉的。
+   ============================================================================ */
+body.menu-open #roster-strip { display: none; }
+body.menu-open #aura {
+  opacity: 0.32; /* 不隱藏：讓人知道東西還在，只是被壓住 */
+  filter: saturate(0.4);
+}
+body.menu-open #aura > * { pointer-events: none; }
+
+/* 確認框開啟時狀態點停止攔截滑鼠：.flip 時中間那顆點正好壓在「✓ 送出」的
+   動作列上，而點的層級（930）高於外圈（900）。只停 pointer-events 不隱藏 ——
+   誰在工作仍然看得見，只是此刻該按的是確認框。 */
+body.confirm-open .roster-dot { pointer-events: none; }
