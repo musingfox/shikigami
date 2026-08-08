@@ -1,3 +1,71 @@
+/* ============================================================================
+   設計 token — DESIGN.md §1（兩軸配色）· §2.5（面板家族）· §3（排版階梯）
+   兩條不可違反的規則：
+     1. 冷色與無彩 = 狀態軸（agent 的狀態），只出現在狀態點與 orb。
+     2. 暖色       = 介面軸（你的事），只出現在可操作物。
+   兩軸不共用色相。原本那個綠整組退出系統 —— 它同時是「工作中」與「可以點」，
+   正是語意撞車的來源。
+   ============================================================================ */
+:root {
+  /* ── 狀態軸 ── 只用於 .roster-dot 與 orb。
+     四種狀態同時靠色相、明度、動態、實心／中空四個維度分開；任一維度失效
+     （色盲、12px 太小、關掉動態）仍剩三個。 */
+  --st-idle:    oklch(64% 0.005 250);   /* #9ba1a8  無彩灰 · 不呼吸 · 縮 0.72 */
+  --st-working: oklch(78% 0.130 200);   /* #40d3e8  青    · 呼吸 3.2s · 實心 */
+  --st-blocked: oklch(68% 0.200 335);   /* #ef5cc4  品紅  · 心跳 1.6s · 中空環 */
+  --st-done:    oklch(89% 0.050 235);   /* #c9e3f7  冷白  · 靜止 · 最亮 */
+
+  /* ── 介面軸 ── 琥珀是「等你決定」的獨佔色，出現在確認框以外即為錯誤。 */
+  --ui-fg:           oklch(93% 0 0);            /* #e9e9e9  可點（靜） */
+  --ui-fg-dim:       oklch(72% 0 0);            /* #aeaeae  次要文字 */
+  --ui-hot:          oklch(100% 0 0);           /* #ffffff  hover / focus */
+  --ui-pending:      oklch(80% 0.150 78);       /* #f4b23c  待你決定 — 只有確認框 */
+  --ui-pending-glow: oklch(80% 0.150 78 / 0.3); /* 同色外暈，見 §3 模糊 18 */
+  --ui-danger:       oklch(64% 0.190 32);       /* #ef6a4a  危險 — 只有選單 Close */
+
+  /* ── 面板 ── 背景不可預測（白文件／黑終端／彩色桌布），深底讓顏色與背景脫鉤。
+     受光邊與外暗邊缺一不可：只有受光邊在白文件上像髒污，只有外暗邊在黑終端
+     上會融進背景。 */
+  --panel-bg:   rgba(12, 14, 19, 0.9);
+  --panel-blur: 10px;
+  --edge-in:    rgba(255, 255, 255, 0.16);  /* 框線 —— 只給可操作的面板 */
+  --edge-out:   rgba(0, 0, 0, 0.52);        /* 外暗邊 */
+  --lit:        rgba(255, 255, 255, 0.1);   /* 頂緣受光，不是一圈框 */
+  --panel-shadow:
+    inset 0 1px 0 var(--lit),
+    0 0 0 1px var(--edge-out),
+    0 10px 22px rgba(0, 0, 0, 0.4);
+  --dot-ring:   0 0 0 1.5px rgba(0, 0, 0, 0.55);  /* 小色點自帶的隔離環 */
+
+  /* ── 排版階梯 ── 不在這幾組值裡的數字就是錯的。 */
+  --f-micro: 10px;  --f-label: 11px;  --f-body: 12px;  --f-head: 13px;
+  --lh-flat: 1;     --lh-tight: 1.35; --lh-read: 1.5;
+  --r-ctl:   4px;   --r-panel: 8px;   --r-round: 999px;
+  --sp-1: 2px; --sp-2: 4px; --sp-3: 6px; --sp-4: 8px; --sp-5: 12px; --sp-6: 16px;
+  --ls-label: 0.02em;   /* 小字標籤 */
+  --ls-caps:  0.08em;   /* 全大寫選單 — 等寬全大寫沒有正字距會擠成一團 */
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* ── 彈出 ── 泡泡與放射選單共用同一條曲線 */
+  --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-pop:  220ms;
+
+  /* ── 幾何 ── */
+  --arc-r:      66px;   /* 狀態點弧半徑 */
+  --dot-hit:    20px;   /* 點擊區 */
+  --dot-vis:    12px;   /* 可見圓徑 */
+  --aura-gap:   64px;   /* 外圈容器錨點：距視窗中心 */
+  --aura-inset:  8px;   /* 容器左右內縮 */
+  --bubble-max: 176px;  /* 泡泡最大寬 */
+
+  /* ── 層級 ── 只有三個值。ui-3 把 toast／confirm／名牌併進 #aura 容器後才會
+     全面套用；在那之前 950／960 保持字面值 —— 現在就把確認框降到 900 會讓
+     狀態點（930）壓住「✓ 送出」的動作列。 */
+  --z-aura: 900;   /* 外圈：確認框 → 報告 → 名牌 */
+  --z-dots: 930;   /* 狀態點：壓在泡泡之上，永遠可 hover */
+  --z-menu: 1000;  /* 放射選單：唯一壓住一切的層 */
+}
+
 html,
 body {
   margin: 0;
@@ -25,26 +93,30 @@ body {
 
 /* bubble sits diagonally between the avatar and the screen center:
    .above flips it over the blob, .lean-left mirrors it horizontally,
-   so its quadrant always faces the center */
+   so its quadrant always faces the center.
+   無框（深底＋頂緣受光＋外暗邊）—— 它只是在說話，不是可以按的東西。 */
 #toast {
   position: absolute;
-  top: calc(50% + 64px);
+  top: calc(50% + var(--aura-gap));
   left: calc(50% - 20px);
-  max-width: 170px;
-  max-height: 76px;
+  max-width: var(--bubble-max);
+  max-height: 66px; /* 3 行 × 18px（12 × 1.5）＋ 上下內距 12 */
   overflow: hidden;
-  padding: 6px 10px;
-  border-radius: 10px;
-  background: rgba(16, 24, 32, 0.85);
-  color: #cdd6e0;
-  font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-panel);
+  background: var(--panel-bg);
+  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  box-shadow: var(--panel-shadow);
+  color: var(--ui-fg);
+  font: var(--f-body) / var(--lh-read) var(--mono);
   opacity: 0;
   transition: opacity 0.4s ease;
 }
 
 #toast.above {
   top: auto;
-  bottom: calc(50% + 64px);
+  bottom: calc(50% + var(--aura-gap));
 }
 
 #toast.lean-left {
@@ -73,8 +145,8 @@ body.menu-open #roster-label {
 
 .roster-dot {
   position: absolute;
-  width: 20px;
-  height: 20px;
+  width: var(--dot-hit);
+  height: var(--dot-hit);
   border: none;
   padding: 0;
   background: transparent;
@@ -84,48 +156,68 @@ body.menu-open #roster-label {
   transition: transform 80ms ease-out;
 }
 
-/* breathe like the orb: a slow, soft swell */
+/* breathe like the orb: a slow, soft swell — working 專用 */
 @keyframes roster-breathe {
   0%, 100% { transform: scale(1); opacity: 0.85; }
   50% { transform: scale(1.22); opacity: 1; }
 }
 
+/* 雙拍心跳 — blocked 專用。與呼吸的正弦感截然不同，是「卡住了」的節奏 */
+@keyframes roster-heartbeat {
+  0%, 24%, 100% { transform: scale(1); }
+  12%, 36% { transform: scale(1.18); }
+  48% { transform: scale(1); }
+}
+
+/* 預設＝ idle（狀態未知也讀作 idle）：不呼吸、縮到 0.72、無彩灰。
+   動態只掛在 working／blocked 上，否則未知狀態的點會跟著呼吸。 */
 .roster-dot::before {
   content: "";
   position: absolute;
-  inset: 4px;
-  border-radius: 50%;
-  background: #6b7280; /* unknown */
-  /* breathing lives on ::before, dock scale on the button — they compose */
-  animation: roster-breathe 3.2s ease-in-out infinite;
-  animation-delay: inherit;
+  inset: 4px; /* 20px 點擊區 → 12px 可見圓 */
+  border-radius: var(--r-round);
+  background: var(--st-idle);
+  box-shadow: var(--dot-ring);
+  transform: scale(0.72);
 }
-.roster-dot[data-status="idle"]::before { background: #9ca3af; }
-
-/* "+N" summon bubble: reveals hidden idle agents */
-.roster-more {
-  color: #9ca3af;
-  font: 9px/20px ui-monospace, monospace;
-  text-align: center;
-  border-radius: 50%;
-  background: rgba(107, 114, 128, 0.25);
-  border: 1px dashed rgba(156, 163, 175, 0.6);
-}
-.roster-more::before { display: none; } /* no breathing dot underneath */
-.roster-more:hover { color: #d1d5db; border-color: #d1d5db; }
-.roster-dot[data-status="done"]::before { background: #60a5fa; }
 .roster-dot[data-status="working"]::before {
-  background: #34d399;
-  box-shadow: 0 0 6px rgba(52, 211, 153, 0.8);
+  background: var(--st-working);
+  /* breathing lives on ::before, dock scale on the button — they compose.
+     animation-delay 必須與 shorthand 同一條規則且排在其後：shorthand 會把
+     delay 重設為 0s，留在基底規則的 inherit 會被覆蓋，所有點就同拍。 */
+  animation: roster-breathe 3.2s ease-in-out infinite;
+  animation-delay: inherit; /* roster.ts 逐點 0.45s stagger */
 }
 .roster-dot[data-status="blocked"]::before {
-  background: #f59e0b;
-  box-shadow: 0 0 6px rgba(245, 158, 11, 0.8);
+  /* 中空環：形狀本身就是第四個維度，動態被關掉時仍分得出來 */
+  background: transparent;
+  box-shadow: inset 0 0 0 2.5px var(--st-blocked), var(--dot-ring);
+  transform: scale(1);
+  animation: roster-heartbeat 1.6s ease-in-out infinite;
+  animation-delay: inherit;
 }
+.roster-dot[data-status="done"]::before {
+  background: var(--st-done);
+  transform: scale(1);
+}
+
+/* "+N" summon bubble: reveals hidden idle agents。它是可操作物 —— 介面軸無彩 */
+.roster-more {
+  color: var(--ui-fg-dim);
+  font: var(--f-micro) / var(--dot-hit) var(--mono);
+  text-align: center;
+  border-radius: var(--r-round);
+  background: var(--panel-bg);
+  border: 1px dashed var(--edge-in);
+  box-sizing: border-box;
+}
+.roster-more::before { display: none; } /* no breathing dot underneath */
+.roster-more:hover { color: var(--ui-hot); border-color: var(--ui-hot); }
 
 /* hover label: fixed caption slot under the orb — appearing never disturbs
    the bubbles, and long names ellipsize inside the window. When a bubble is
-   click-selected it turns sticky and gains action buttons (↗ jump / 🎙 talk). */
+   click-selected it turns sticky and gains action buttons (↗ jump / 🎙 talk).
+   無框 —— 它只是在說話。 */
 #roster-label {
   position: fixed;
   top: calc(50% + 62px);
@@ -134,12 +226,16 @@ body.menu-open #roster-label {
   max-width: calc(100% - 12px);
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border-radius: 6px;
-  background: rgba(16, 24, 32, 0.9);
-  color: #cdd6e0;
-  font: 10px/1.3 ui-monospace, "SF Mono", Menlo, monospace;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-panel);
+  background: var(--panel-bg);
+  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  box-shadow: var(--panel-shadow);
+  color: var(--ui-fg);
+  font: var(--f-micro) / var(--lh-tight) var(--mono);
+  letter-spacing: var(--ls-label);
   opacity: 0;
   transition: opacity 120ms ease;
   pointer-events: none;
@@ -154,32 +250,39 @@ body.menu-open #roster-label {
   white-space: nowrap;
 }
 
+/* 動作鈕：可操作 → 白細框（§2.5） */
 #roster-label button {
   flex: none;
-  border: 1px solid rgba(52, 211, 153, 0.5);
-  border-radius: 4px;
-  background: rgba(52, 211, 153, 0.12);
-  color: #d9f5ec;
-  font: 10px/1 ui-monospace, monospace;
-  padding: 2px 4px;
+  border: 1px solid var(--edge-in);
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--ui-fg);
+  font: var(--f-micro) / var(--lh-flat) var(--mono);
+  padding: var(--sp-1) var(--sp-2);
   cursor: pointer;
 }
-#roster-label button:hover { border-color: #22d3ee; color: #22d3ee; }
+#roster-label button:hover { border-color: var(--ui-hot); color: var(--ui-hot); }
 
-/* confirm bubble: toast geometry (diagonal, multi-line, full text) with an
-   amber accent so a pending inject is unmistakable */
+/* confirm bubble: toast geometry (diagonal, multi-line, full text) on the same
+   deep panel as everything else — 琥珀只在框與外暈上，是全系統唯一有框的說話
+   面板。內文用 --ui-fg，對比度表（§1.3）就是對這個底量的。 */
 #confirm-bar {
   position: absolute;
-  top: calc(50% + 64px);
+  top: calc(50% + var(--aura-gap));
   left: calc(50% - 20px);
   max-width: 170px;
-  padding: 6px 10px;
-  border-radius: 10px;
-  background: rgba(30, 22, 6, 0.92);
-  border: 1px solid rgba(245, 158, 11, 0.65);
-  box-shadow: 0 0 12px rgba(245, 158, 11, 0.25);
-  color: #f5deb0;
-  font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-panel);
+  background: var(--panel-bg);
+  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  border: 1px solid var(--ui-pending);
+  box-shadow:
+    inset 0 1px 0 var(--lit),
+    0 0 0 1px var(--edge-out),
+    0 0 18px var(--ui-pending-glow);
+  color: var(--ui-fg);
+  font: var(--f-body) / var(--lh-read) var(--mono);
   opacity: 0;
   transition: opacity 120ms ease;
   pointer-events: none;
@@ -193,14 +296,14 @@ body.menu-open #roster-label {
 #confirm-bar span {
   display: block;
   word-break: break-word;
-  margin-bottom: 6px;
+  margin-bottom: var(--sp-3);
 }
 
 /* summon proposal: the project about to be created reads brighter than a
-   transcript — same amber bar, one notch of emphasis */
+   transcript — 琥珀在確認框內部，合法 */
 #confirm-bar span.summon-target {
-  color: #fbbf24;
-  letter-spacing: 0.04em;
+  color: var(--ui-pending);
+  letter-spacing: var(--ls-label);
 }
 
 /* editable transcript: Enter sends, Shift+Enter newlines */
@@ -208,13 +311,13 @@ body.menu-open #roster-label {
   display: block;
   width: 100%;
   box-sizing: border-box;
-  margin-bottom: 6px;
-  padding: 3px 5px;
-  border: 1px solid rgba(245, 158, 11, 0.4);
-  border-radius: 5px;
+  margin-bottom: var(--sp-3);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--edge-in);
+  border-radius: var(--r-ctl);
   background: rgba(0, 0, 0, 0.35);
-  color: #fbe4b8;
-  font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--ui-fg);
+  font: var(--f-body) / var(--lh-read) var(--mono);
   resize: none;
   overflow-y: auto;
   user-select: text;
@@ -223,25 +326,25 @@ body.menu-open #roster-label {
 }
 #confirm-bar textarea:focus {
   outline: none;
-  border-color: #fbbf24;
+  border-color: var(--ui-hot);
 }
 
 #confirm-bar .actions {
   display: flex;
-  gap: 6px;
+  gap: var(--sp-3);
   justify-content: flex-end;
 }
 
 #confirm-bar button {
-  border: 1px solid rgba(245, 158, 11, 0.6);
-  border-radius: 4px;
-  background: rgba(245, 158, 11, 0.12);
-  color: #f5deb0;
-  font: 11px/1 ui-monospace, monospace;
-  padding: 3px 8px;
+  border: 1px solid var(--edge-in);
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--ui-fg);
+  font: var(--f-label) / var(--lh-flat) var(--mono);
+  padding: var(--sp-2) var(--sp-4);
   cursor: pointer;
 }
-#confirm-bar button:hover { border-color: #fbbf24; color: #fbbf24; }
+#confirm-bar button:hover { border-color: var(--ui-hot); color: var(--ui-hot); }
 
 #radial-menu {
   position: fixed;
@@ -250,36 +353,42 @@ body.menu-open #roster-label {
   width: 320px;
   height: 360px;
   pointer-events: none;
-  z-index: 1000; /* above toast per contract */
+  z-index: var(--z-menu); /* above toast per contract */
 }
 
 #radial-menu button[role="menuitem"] {
   position: absolute;
-  padding: 7px 14px;
+  padding: 7px var(--sp-6);
   white-space: nowrap;
-  border-radius: 6px;
-  border: 1px solid rgba(52, 211, 153, 0.7);
-  background: linear-gradient(135deg, rgba(6, 18, 20, 0.92), rgba(10, 28, 30, 0.92));
-  color: #d9f5ec;
-  font: 12px/1 ui-monospace, monospace;
-  letter-spacing: 0.08em;
+  border-radius: var(--r-panel);
+  border: 1px solid var(--edge-in);
+  background: var(--panel-bg);
+  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  backdrop-filter: blur(var(--panel-blur)) saturate(1.2);
+  color: var(--ui-fg);
+  font: var(--f-body) / var(--lh-flat) var(--mono);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   cursor: pointer;
   pointer-events: auto;
-  transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 160ms ease;
-  box-shadow: 0 0 12px rgba(52, 211, 153, 0.45), inset 0 0 6px rgba(52, 211, 153, 0.15);
+  transition: transform var(--dur-pop) var(--ease-pop), opacity 160ms ease;
+  box-shadow: 0 0 0 1px var(--edge-out), 0 10px 22px rgba(0, 0, 0, 0.4);
 }
 
-#radial-menu button[role="menuitem"].active {
-  border-color: rgba(34, 211, 238, 0.9);
-  color: #22d3ee;
-  box-shadow: 0 0 14px rgba(34, 211, 238, 0.65), inset 0 0 6px rgba(34, 211, 238, 0.25);
-}
-
+#radial-menu button[role="menuitem"].active,
 #radial-menu button[role="menuitem"]:hover {
-  border-color: #22d3ee;
-  box-shadow: 0 0 14px rgba(34, 211, 238, 0.6);
+  border-color: var(--ui-hot);
+  color: var(--ui-hot);
 }
+
+/* Close 是唯一的危險項。放在 hover 規則之後，同特異度後者勝，
+   於是它 hover 也不會變成白色。 */
+#radial-menu button[data-id="close"],
+#radial-menu button[data-id="close"]:hover {
+  border-color: var(--ui-danger);
+  color: var(--ui-danger);
+}
+
 /* MenuDismiss support: fade when removing items (js removes after) */
 #radial-menu.closing {
   transition: opacity 80ms ease;
