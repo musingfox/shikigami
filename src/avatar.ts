@@ -18,6 +18,15 @@ const STOPS_IDLE = [[214, 240, 248], [64, 206, 232], [22, 84, 100]];
 const STOPS_BUSY = [[176, 196, 206], [104, 150, 166], [44, 64, 72]];
 const AMBER = "244,178,60"; // --ui-pending #f4b23c
 
+// Read once, no change listener: the whole point of the setting is to stop
+// things from moving, and re-reading it live would itself be a change.
+// Breathing is frozen but the mouth is only halved — a silent orb during
+// speech would lose the one thing lip-sync is for.
+const REDUCED =
+  typeof matchMedia === "function" &&
+  matchMedia("(prefers-reduced-motion: reduce)").matches;
+const VOL = REDUCED ? 0.06 : 0.12;
+
 // All line widths below are canvas units. The canvas is 160 and CSS shows it
 // at 120, so 顯示線寬 × (160/120) = 顯示線寬 × 1.3333. Filling the spec's
 // display values straight in would give three quarters of the intended weight.
@@ -83,7 +92,7 @@ function radius(theta: number, l: number) {
   // kWobble only touches the two terms that are NOT volume-driven. The
   // 0.12*l*sin(3θ) term is the mouth; damping it would flatten speech while busy.
   const driven =
-    0.12 * l * Math.sin(3 * theta + wobA) +
+    VOL * l * Math.sin(3 * theta + wobA) +
     kWobble * 0.06 * Math.sin(5 * theta - wobB);
   return BASE_R * kRadius * b * swell * (1 + idleW + driven);
 }
@@ -152,14 +161,19 @@ function loop(t: number) {
   lvl += (lvlTarget - lvl) * (1 - Math.exp(-12 * dt));
   // busy: 呼吸 2.4 rad/s · 半徑 ×0.90 · 輪廓抖動 ×0.45 · 漸層褪色，全部趨近不硬切
   const k = 1 - Math.exp(-6 * dt);
-  kSpeed += ((busy ? 2.4 / 1.1 : 1) - kSpeed) * k;
+  // reduced motion freezes the speed only; the three static coefficients keep
+  // working so busy is still legible as 收緊、褪色 without any motion at all
+  kSpeed += ((REDUCED ? 0 : busy ? 2.4 / 1.1 : 1) - kSpeed) * k;
   kRadius += ((busy ? 0.9 : 1) - kRadius) * k;
   kWobble += ((busy ? 0.45 : 1) - kWobble) * k;
   kFade += ((busy ? 1 : 0) - kFade) * k;
+  // the four phases are frozen one by one, not together: wobA only ever shows
+  // up multiplied by l, so freezing it would stiffen the mouth instead of the
+  // idle drift. wobB has no l — it moves forever unless it is frozen here.
   breathe += 1.1 * kSpeed * dt;
-  idle += 0.7 * dt;
+  idle += REDUCED ? 0 : 0.7 * dt;
   wobA += 2.2 * dt;
-  wobB += 1.4 * dt;
+  wobB += REDUCED ? 0 : 1.4 * dt;
   // adaptive fps: idle 20fps (stride 3 @60), active/busy 60fps (stride 1) —
   // a doubled breath rate at 20fps reads as stutter, not as urgency
   tick++;
