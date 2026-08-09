@@ -3,8 +3,21 @@
 Desktop-floating voice companion. Positioning: **1:1:N** — one human, one
 shikigami, N coding agents. One floating avatar that **observes** your agents
 (reports progress by voice + reaction), answers questions about them, and
-relays your **voice commands** to them. It is NOT an agent engine: agents run
-in your terminals; shikigami watches them and, when asked, pokes them.
+relays your **voice commands** to them.
+
+Shikigami **is** an agent — it is the 1, and the target is JARVIS: enough
+intelligence and memory to consolidate what every agent (local or online) is
+doing and to dispatch them onward. It is **not** an agent engine — it never
+runs the N. Those are two different claims and an earlier wording ran them
+together.
+
+**The rule that survives: shikigami never becomes one of the N.** It never
+owns work without a pane you can take over. R2d's summon boundary and the
+`claude -p` / Agent SDK / ACP-spawn ban both hang off this rule — "shikigami
+is an agent" is not a licence to spawn.
+
+Which engine the brain runs on is **open**, see
+`pm/shikigami/docs/core-brain-open-question.md` (2026-08-10).
 
 Metaphor: you = onmyōji; each backend agent = a *shikigami* (式神) you already
 summoned; this app is how you hear from and speak to them.
@@ -12,7 +25,9 @@ summoned; this app is how you hear from and speak to them.
 ## Two channels
 
 ```
-① OBSERVE (inbound, DONE)   agent event → avatar reaction + spoken report
+① OBSERVE (inbound)         agent event → avatar reaction + spoken report
+                            DONE for coarse status (idle/working/blocked);
+                            "what is it stuck ON" needs R-observe
 ② COMMAND (outbound)        you speak → STT → brain → act (inject) → speak back
                             STT/brain/speak DONE 2026-07-15 (answer-only); act lands in R2
 ```
@@ -130,11 +145,22 @@ speak to N, then breadth. Avatar/Linux are off the critical path.
   (ask when ambiguous, never guess) → inject via `pane.send_text` with
   **confirm-before-inject** → multi-turn brain memory. Accept: "叫X跑測試" →
   confirm → text lands in X's pane. Product thesis proven here.
+- **R-observe — depth of what it sees** (2026-08-10, promoted out of R1):
+  `AgentEntry` carries one 5-way status plus a terminal title, so the brain can
+  say "A is stuck" but never "stuck on what". A stronger brain over that input
+  still only produces a status board — depth is upstream of intelligence.
+  Ticket `r-observe-depth`.
+- **R-memory — memory that survives a restart** (2026-08-10, promoted out of
+  R2's tail): brain history is 6 turns in a process `Mutex`, gone on restart.
+  JARVIS needs yesterday's assignments, not the last six lines. Independent of
+  model tier — a better model does not produce memory. Ticket
+  `r-brain-durable-memory`.
 - **R3 — transport breadth**: tmux + zellij (≥0.44 version check) adapters;
   port surface stays roster+send.
-- **R4 — ecosystem/platform**: ACP adapter (background agents),
-  Linux/Hyprland (window rules, Hyprland hotkey bind, xdg-open in tray,
-  Wayland caveats above).
+- **R4 — ecosystem/platform**: ACP adapter (background agents) — this is also
+  where **online** agents land (OpenAB is a candidate adapter here, *not* a
+  candidate brain); Linux/Hyprland (window rules, Hyprland hotkey bind,
+  xdg-open in tray, Wayland caveats above).
 - **R5 — polish**: pre-baked AI video clips replacing the canvas blob (grok
   image→video, details in SumVox project memory).
 - **Watch (unscheduled)**: A2A, TanStack AI realtime voice.
