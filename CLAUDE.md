@@ -19,6 +19,30 @@ is an agent" is not a licence to spawn.
 Which engine the brain runs on is **open**, see
 `pm/shikigami/docs/core-brain-open-question.md` (2026-08-10).
 
+### Two axes — 1:1:N only describes the first
+
+| | manage agents | local affairs (computer use) |
+|---|---|---|
+| subject | the N agents | the machine itself |
+| port | roster + send | MCP tools |
+| adapter | herdr (today) → tmux / zellij / ACP | shikigami-bridge |
+
+The second axis has no N, so the 1:1:N formula cannot express it. Reading
+1:1:N as the whole picture is a mistake — half the point is that shikigami
+helps with what you do on this computer, not only with what your agents do.
+
+**Repo boundary (2026-08-10):** this repo owns the **core** and **how it
+interacts with the human and with agents**. Every tool — the hands — lives in
+`../shikigami-bridge`. So the MCP *client* belongs here (the core has to be
+able to reach for a tool); no tool *implementation* does.
+
+A shell-capable CLI is not disqualified from the second axis: `bash` + files
++ MCP is a general computer interface, not a coding-specific one, and
+shikigami-bridge's own README puts `Claude / MCP client` at the top of its
+architecture — it was built to be driven this way. Tool *shape* therefore does
+not discriminate between core candidates; what does is on the two axes above
+plus latency, memory, and the pane rule.
+
 Metaphor: you = onmyōji; each backend agent = a *shikigami* (式神) you already
 summoned; this app is how you hear from and speak to them.
 
@@ -69,9 +93,10 @@ See `ARCHITECTURE.md` — hexagonal, one core event contract
   2026-06-15 billing change — `claude -p` / Agent SDK / ACP to a separate
   Agent SDK credit — is **paused**, everything currently bills to the
   subscription; Anthropic says it is re-planning.) Decision unchanged, for
-  two reasons: positioning — ACP-spawned agents have no TUI, which conflicts
-  with "agents run in *your* terminals"; and the billing risk if the pause
-  lifts. Channel ② injects into the user's live pane, never spawns.
+  two reasons: positioning — ACP-spawned agents have no TUI, so shikigami
+  would own work with no pane you can take over, which is exactly what the
+  surviving rule above forbids; and the billing risk if the pause lifts.
+  Channel ② injects into the user's live pane, never spawns.
 - **Summon boundary (R2d).** Voice summon opens a herdr tab in the project
   directory and starts claude in that pane (`tab.create` → `agent.start` →
   `agent.wait` → `agent.prompt`). This does not weaken the rule above: the new
@@ -155,6 +180,13 @@ speak to N, then breadth. Avatar/Linux are off the critical path.
   JARVIS needs yesterday's assignments, not the last six lines. Independent of
   model tier — a better model does not produce memory. Ticket
   `r-brain-durable-memory`.
+- **R-hands — reach the second axis** (2026-08-10, previously absent from the
+  roadmap entirely — `bridge`/`MCP` appear 0 times in this repo's code and
+  once in this file, under Related repos): an MCP client so the core can
+  actually pick up shikigami-bridge's tools, and the contract between the two.
+  Tool implementations stay in `../shikigami-bridge` per the repo boundary
+  above. Blocked on nothing; leverage here likely exceeds the core choice,
+  since any shell+MCP engine can only do what the hands can do.
 - **R3 — transport breadth**: tmux + zellij (≥0.44 version check) adapters;
   port surface stays roster+send.
 - **R4 — ecosystem/platform**: ACP adapter (background agents) — this is also
