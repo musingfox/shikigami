@@ -137,6 +137,16 @@ export function setCaptureReadyListener(fn: ((ready: boolean) => void) | null) {
   captureReadyListener = fn;
 }
 
+// A take can end with nothing usable — no frames at all, or pure silence from
+// a mic macOS refused. The interceptor never runs on those paths, so whoever
+// armed a targeted take needs a way to unwind: hide its bubble, release the
+// window, disarm the target. Without it the next ordinary question is silently
+// redirected into that agent's confirm bar.
+let utteranceAbortListener: (() => void) | null = null;
+export function setUtteranceAbortListener(fn: (() => void) | null) {
+  utteranceAbortListener = fn;
+}
+
 // Double-click the orb to talk: first call starts capture, second stops+sends.
 // Rust owns the listening state (voice::LISTENING) — we just flip it there and
 // let the VOICE_LISTENING event drive capture, the exact same path as the PTT
@@ -227,8 +237,24 @@ async function stopCaptureAndSend() {
   processor = null;
   audioCtx = null;
 
-  if (samples.length === 0) return;
+  if (samples.length === 0) {
+    utteranceAbortListener?.();
+    return;
+  }
   const native = Float32Array.from(samples);
+  // macOS refuses the mic by handing back silence, not an error: getUserMedia
+  // resolves, buffers arrive on time and full-length, and every sample is 0
+  // (coreaudiod: "Client is not granted access to the input device"). Without
+  // this guard the take travels all the way through whisper and comes back as
+  // "brain: empty transcript", which reads like a recognition failure and cost
+  // a whole debugging session to tell apart. A live mic never returns exact 0.
+  if (rms(native) === 0) {
+    // exact 0 also happens with a muted or wrongly-selected input device, so
+    // the message names all three rather than asserting the permission case
+    surfaceError("mic: 沒有收到麥克風訊號（未授權、靜音，或選錯輸入裝置）");
+    utteranceAbortListener?.();
+    return;
+  }
   const down = resampleTo16k(native, nativeSampleRate);
   const bytes = new Uint8Array(down.buffer);
   const pcm = Array.from(bytes);
@@ -251,6 +277,10 @@ async function startCaptureOrRollback() {
   if (!testMode && !mediaStream) {
     listening = false;
     recordSpeak(false);
+    // third dead end, same class as the other two: getUserMedia threw, so no
+    // take exists to intercept. Without this a targeted talk keeps its target
+    // armed and the orb stuck busy.
+    utteranceAbortListener?.();
     // reset the Rust side too, or the next PTT press-release cycle is swallowed
     invoke("set_listening", { on: false }).catch(() => {});
   }

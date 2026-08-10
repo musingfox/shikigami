@@ -11,6 +11,7 @@ import {
   isListening,
   setCaptureReadyListener,
   setSummonHandler,
+  setUtteranceAbortListener,
   setUtteranceInterceptor,
   toggleTalk,
 } from "./mic";
@@ -314,6 +315,14 @@ function hideConfirm() {
 export function initCommand() {
   setUtteranceInterceptor(onUtterance);
   setSummonHandler(onSummonProposal);
+  // a take that produced nothing never reaches onUtterance, so the unwind that
+  // its empty-text branch would have done has to happen here instead
+  setUtteranceAbortListener(() => {
+    target = null; // or the next ordinary question lands in this agent's confirm
+    // cancelSummon, not hideConfirm: if a summon proposal happened to be open,
+    // hiding it would leave pendingSummon armed with no UI behind it
+    cancelSummon();
+  });
   setCaptureReadyListener((ready) => {
     if (ready && target) {
       // keeps its bubble: 對誰說話 only exists here, and speaking blind is
