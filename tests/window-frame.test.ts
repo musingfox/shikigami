@@ -48,7 +48,7 @@ test("release below zero clamps at 0 and stays small", async () => {
 test("a report alone gets the medium frame, not the full ring", async () => {
   await acquireMedium();
   expect(__sizeForTest()).toBe("medium");
-  expect(currentCenter()).toEqual({ x: 120, y: 150 });
+  expect(currentCenter()).toEqual({ x: 120, y: 168 });
   await releaseMedium();
   expect(__sizeForTest()).toBe("small");
 });

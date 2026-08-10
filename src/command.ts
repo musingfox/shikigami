@@ -107,6 +107,9 @@ function showStage(text: string, buttonText?: string, onButton?: () => void) {
   }
   el.classList.add("stage"); // 只是在說話 —— 無框，不帶琥珀
   setPending(false);
+  // 對稱於 decide()：stage 不是決定，狀態點必須活著。少了這行，按下「✓ 召喚」
+  // 之後那 10 秒的 herdr chain 全程都還掛著 confirm-open，點是死的。
+  document.body.classList.remove("confirm-open");
   reveal(el);
 }
 
