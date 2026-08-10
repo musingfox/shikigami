@@ -122,6 +122,10 @@ body {
 }
 
 #aura > * {
+  /* 這份 CSS 沒有全域 `*` reset，預設 content-box —— 不明寫的話 #toast 的
+     max-height 66 會算成 78（內距沒被含進去），#confirm-bar 的 width 248 會
+     算成 264，兩個數字都是照「含內距」推導出來的。 */
+  box-sizing: border-box;
   max-width: var(--bubble-max);
   border-radius: var(--r-panel);
   background: var(--panel-bg);

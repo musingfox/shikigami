@@ -8,11 +8,14 @@ import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api
 // 176: leaves ~13px of breathing room past the roster arc so dock-magnified
 // bubbles don't clip at the window edge
 const SMALL = { w: 176, h: 176, cx: 88, cy: 88 };
-// A lone report needs 錨點 64 + 泡泡 66 = 130 from the center; 150 leaves room.
+// A report never appears alone: the name label is hover-driven and must not
+// grow the window (a resize would re-arc the dots under the cursor), so it
+// shares this frame. 錨點 64 + 報告 66 + gap 8 + 名牌 20 = 158, rounded to 168
+// and doubled — the same derivation as LARGE's 286 → 296.
 // agent:report is pushed from outside, not asked for, so this is the size the
 // window sits at most of the time — paying 592 for it means a transparent but
 // mouse-blocking 320×592 rectangle for every report, 3s at a time.
-const MEDIUM = { w: 240, h: 300, cx: 120, cy: 150 };
+const MEDIUM = { w: 240, h: 336, cx: 120, cy: 168 };
 // 592: the full outer ring — 錨點 64 + 確認框 120 + gap 8 + 報告 66 + gap 8 +
 // 名牌 20 = 286, rounded to 296 and doubled. Also what the radial menu needs.
 const LARGE = { w: 320, h: 592, cx: 160, cy: 296 };
