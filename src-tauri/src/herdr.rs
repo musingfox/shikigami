@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 const POLL: Duration = Duration::from_secs(2);
@@ -142,14 +142,23 @@ fn is_agent_not_ready(err: &str) -> bool {
 }
 
 fn prompt_until_accepted<F: FnMut() -> Result<Value, String>>(
-    _deadline: Duration,
+    deadline: Duration,
     interval: Duration,
     mut send: F,
 ) -> Result<Value, String> {
+    let start = Instant::now();
+    let mut attempts = 0;
     loop {
+        attempts += 1;
         match send() {
             Ok(result) => return Ok(result),
             Err(err) if !is_agent_not_ready(&err) => return Err(err),
+            Err(err) if start.elapsed() >= deadline => {
+                return Err(format!(
+                    "agent.prompt still rejected as agent_not_ready after {}ms ({attempts} attempts); last error: {err}",
+                    start.elapsed().as_millis()
+                ));
+            }
             Err(_) => std::thread::sleep(interval),
         }
     }
@@ -573,6 +582,29 @@ mod tests {
         assert_eq!(got.unwrap(), serde_json::json!({"ok": true}));
         assert_eq!(calls.get(), 1);
         assert!(start.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn pr2_timeout_names_prompt_step_and_preserves_last_error() {
+        let calls = std::cell::Cell::new(0usize);
+        let err = "herdr agent.prompt: {\"code\":\"agent_not_ready\",\"message\":\"agent wD:pB is not an active named agent\"}";
+        let start = std::time::Instant::now();
+        let got = prompt_until_accepted(
+            Duration::from_millis(30),
+            Duration::from_millis(5),
+            || {
+                calls.set(calls.get() + 1);
+                Err(err.to_string())
+            },
+        );
+        let elapsed = start.elapsed();
+        let err = got.unwrap_err();
+        assert!(err.contains("agent.prompt"), "{err}");
+        assert!(err.contains("agent_not_ready"), "{err}");
+        assert!(err.contains("agent wD:pB is not an active named agent"), "{err}");
+        assert!(elapsed >= Duration::from_millis(30), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        assert!((2..=100).contains(&calls.get()), "{}", calls.get());
     }
 
     /// T4 — the whole chain against a live herdr, on a real project directory.
