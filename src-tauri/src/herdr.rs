@@ -143,6 +143,23 @@ const PROMPT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// push the give-up time to ~270s, well past the 120s budget.
 const PROMPT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// herdr keeps one agent per name for as long as the pane lives, so naming a
+/// summoned agent after its project alone meant the second summon of that
+/// project — or the first one after a failed summon left its pane open — died
+/// with `agent_name_taken`. The suffix is the clock truncated to four digits:
+/// short enough to still say out loud (the roster feeds voice targeting), and
+/// only repeats for two summons landing exactly 10000s apart.
+fn agent_name(project: &str, epoch_secs: u64) -> String {
+    format!("{project}-{:04}", epoch_secs % 10_000)
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn is_agent_not_ready(err: &str) -> bool {
     err.contains("\"code\":\"agent_not_ready\"")
 }
@@ -239,7 +256,7 @@ pub fn summon(project: &str, task: &str, cwd: &str) -> Result<String, String> {
             0,
             "agent.start",
             serde_json::json!({
-                "name": project,
+                "name": agent_name(project, now_secs()),
                 "kind": "claude",
                 "pane_id": pane,
                 "timeout_ms": SUMMON_TIMEOUT_MS,
@@ -630,6 +647,17 @@ mod tests {
     /// The bound the give-up time relies on: with a coarse interval the old
     /// shape woke up past the deadline and still issued one more send, which
     /// then got a full read timeout to run in.
+    #[test]
+    fn an1_agent_name_carries_the_project_and_a_four_digit_clock() {
+        assert_eq!(agent_name("shikigami", 1_786_000_123), "shikigami-0123");
+        assert_eq!(agent_name("shikigami", 7), "shikigami-0007");
+    }
+
+    #[test]
+    fn an2_two_summons_a_second_apart_get_different_names() {
+        assert_ne!(agent_name("shikigami", 1_786_000_123), agent_name("shikigami", 1_786_000_124));
+    }
+
     #[test]
     fn pr7_no_send_is_issued_after_the_deadline() {
         let start = std::time::Instant::now();
