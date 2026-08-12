@@ -666,9 +666,12 @@ mod tests {
             requests
         });
         let got = prompt_step(&path, "wD:pB", "跑測試");
+        // Assert before joining: a single-shot regression never opens the second
+        // connection, so joining first would block the run forever instead of
+        // failing it (cargo test has no per-test timeout).
+        assert_eq!(got.unwrap(), serde_json::json!({"ok": true}));
         let requests = h.join().unwrap();
         let _ = std::fs::remove_file(&path);
-        assert_eq!(got.unwrap(), serde_json::json!({"ok": true}));
         assert_eq!(requests.len(), 2);
         for request in requests {
             assert_eq!(request["method"], "agent.prompt");
