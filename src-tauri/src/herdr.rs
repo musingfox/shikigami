@@ -137,6 +137,14 @@ pub fn prompt_agent(pane: String, text: String) -> Result<(), String> {
 const SUMMON_TIMEOUT_MS: u64 = 120_000;
 const SUMMON_READ_TIMEOUT: Duration = Duration::from_secs(150);
 
+fn prompt_until_accepted<F: FnMut() -> Result<Value, String>>(
+    _deadline: Duration,
+    _interval: Duration,
+    mut send: F,
+) -> Result<Value, String> {
+    send()
+}
+
 /// The pane a fresh `tab.create` opened, from its `tab_created` result.
 pub fn extract_pane_id(result: &Value) -> Result<String, String> {
     result
@@ -495,6 +503,33 @@ mod tests {
     fn sc3_step_failure_carries_its_herdr_method() {
         let err = step("agent.start", Err("connection closed".to_string())).unwrap_err();
         assert_eq!(err, "summon agent.start: connection closed");
+    }
+
+    // PromptRetry
+    #[test]
+    fn pr3a_non_not_ready_error_fails_immediately() {
+        let calls = std::cell::Cell::new(0usize);
+        let err = "herdr agent.prompt: {\"code\":\"agent_not_found\",\"message\":\"no such agent\"}";
+        let start = std::time::Instant::now();
+        let got = prompt_until_accepted(Duration::from_secs(1), Duration::from_millis(1), || {
+            calls.set(calls.get() + 1);
+            Err(err.to_string())
+        });
+        assert_eq!(got.unwrap_err(), err);
+        assert_eq!(calls.get(), 1);
+        assert!(start.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn pr3b_message_token_without_code_pair_fails_immediately() {
+        let calls = std::cell::Cell::new(0usize);
+        let err = "herdr agent.prompt: {\"code\":\"agent_not_found\",\"message\":\"agent_not_ready was not the problem\"}";
+        let got = prompt_until_accepted(Duration::from_secs(1), Duration::from_millis(1), || {
+            calls.set(calls.get() + 1);
+            Err(err.to_string())
+        });
+        assert_eq!(got.unwrap_err(), err);
+        assert_eq!(calls.get(), 1);
     }
 
     /// T4 — the whole chain against a live herdr, on a real project directory.
