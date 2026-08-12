@@ -354,12 +354,15 @@ mod speech_tests {
         assert!(content.contains("say"));
         assert!(content.contains("hi"));
     }
+    // Drives the spawn failure through say_plan + spawn_plan instead of
+    // spawn_say: spawn_say consults is_muted(), which reads the real
+    // ~/.config/sumvox/muted, so this test went red whenever the user had
+    // muted the tray. Same assertion, no real user state, no global PATH
+    // mutation (which raced other tests running in parallel).
     #[test]
-    fn t4_spawn_prod_empty_path_err_contains_sumvox() {
-        let old = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", "");
-        let err = spawn_say("x").unwrap_err();
-        std::env::set_var("PATH", old);
-        assert!(err.contains("sumvox"));
+    fn t4_spawn_plan_missing_binary_err_contains_sumvox() {
+        let (_, args) = say_plan(false, "x").expect("not muted → a plan");
+        let err = spawn_plan(std::path::Path::new("/nonexistent/sumvox"), &args).unwrap_err();
+        assert!(err.contains("sumvox"), "got: {err}");
     }
 }
