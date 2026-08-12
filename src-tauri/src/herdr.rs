@@ -137,6 +137,11 @@ pub fn prompt_agent(pane: String, text: String) -> Result<(), String> {
 const SUMMON_TIMEOUT_MS: u64 = 120_000;
 const SUMMON_READ_TIMEOUT: Duration = Duration::from_secs(150);
 const PROMPT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+/// agent.prompt is not a blocking herdr method — an accept comes back in
+/// milliseconds and a not-ready rejection took ~70ms in the 0.8.0 repro. Giving
+/// each retry attempt the 150s summon read timeout would let the last attempt
+/// push the give-up time to ~270s, well past the 120s budget.
+const PROMPT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn is_agent_not_ready(err: &str) -> bool {
     err.contains("\"code\":\"agent_not_ready\"")
@@ -149,20 +154,27 @@ fn prompt_until_accepted<F: FnMut() -> Result<Value, String>>(
 ) -> Result<Value, String> {
     let start = Instant::now();
     let mut attempts = 0;
-    loop {
+    // The deadline is checked after the sleep, never after the send: a send is
+    // only ever issued from inside the deadline, so giving up overshoots by one
+    // attempt's read timeout at most. Checking it on the send's own error would
+    // let an attempt started at deadline-ε run its full read timeout on top.
+    let last_err = loop {
         attempts += 1;
         match send() {
             Ok(result) => return Ok(result),
             Err(err) if !is_agent_not_ready(&err) => return Err(err),
-            Err(err) if start.elapsed() >= deadline => {
-                return Err(format!(
-                    "agent.prompt still rejected as agent_not_ready after {}ms ({attempts} attempts); last error: {err}",
-                    start.elapsed().as_millis()
-                ));
+            Err(err) => {
+                std::thread::sleep(interval);
+                if start.elapsed() >= deadline {
+                    break err;
+                }
             }
-            Err(_) => std::thread::sleep(interval),
         }
-    }
+    };
+    Err(format!(
+        "agent.prompt still rejected as agent_not_ready after {}ms ({attempts} attempts); last error: {last_err}",
+        start.elapsed().as_millis()
+    ))
 }
 
 fn prompt_step(sock: &std::path::Path, pane: &str, task: &str) -> Result<Value, String> {
@@ -172,7 +184,7 @@ fn prompt_step(sock: &std::path::Path, pane: &str, task: &str) -> Result<Value, 
         || {
             call_at(
                 sock,
-                SUMMON_READ_TIMEOUT,
+                PROMPT_READ_TIMEOUT,
                 0,
                 "agent.prompt",
                 serde_json::json!({ "target": pane, "text": task }),
@@ -613,6 +625,26 @@ mod tests {
         assert!(elapsed >= Duration::from_millis(30), "{elapsed:?}");
         assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
         assert!((2..=100).contains(&calls.get()), "{}", calls.get());
+    }
+
+    /// The bound the give-up time relies on: with a coarse interval the old
+    /// shape woke up past the deadline and still issued one more send, which
+    /// then got a full read timeout to run in.
+    #[test]
+    fn pr7_no_send_is_issued_after_the_deadline() {
+        let start = std::time::Instant::now();
+        let sends = std::cell::RefCell::new(Vec::new());
+        let deadline = Duration::from_millis(30);
+        let got = prompt_until_accepted(deadline, Duration::from_millis(20), || {
+            sends.borrow_mut().push(start.elapsed());
+            Err("herdr agent.prompt: {\"code\":\"agent_not_ready\",\"message\":\"x\"}".to_string())
+        });
+        assert!(got.is_err());
+        let sends = sends.borrow();
+        assert!(sends.len() >= 2, "{sends:?}");
+        for at in sends.iter() {
+            assert!(*at < deadline, "send issued at {at:?}, past the {deadline:?} deadline");
+        }
     }
 
     #[test]
