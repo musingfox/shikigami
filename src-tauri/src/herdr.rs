@@ -136,6 +136,7 @@ pub fn prompt_agent(pane: String, text: String) -> Result<(), String> {
 /// went wrong.
 const SUMMON_TIMEOUT_MS: u64 = 120_000;
 const SUMMON_READ_TIMEOUT: Duration = Duration::from_secs(150);
+const PROMPT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 fn is_agent_not_ready(err: &str) -> bool {
     err.contains("\"code\":\"agent_not_ready\"")
@@ -162,6 +163,22 @@ fn prompt_until_accepted<F: FnMut() -> Result<Value, String>>(
             Err(_) => std::thread::sleep(interval),
         }
     }
+}
+
+fn prompt_step(sock: &std::path::Path, pane: &str, task: &str) -> Result<Value, String> {
+    prompt_until_accepted(
+        Duration::from_millis(SUMMON_TIMEOUT_MS),
+        PROMPT_RETRY_INTERVAL,
+        || {
+            call_at(
+                sock,
+                SUMMON_READ_TIMEOUT,
+                0,
+                "agent.prompt",
+                serde_json::json!({ "target": pane, "text": task }),
+            )
+        },
+    )
 }
 
 /// The pane a fresh `tab.create` opened, from its `tab_created` result.
@@ -235,16 +252,7 @@ pub fn summon(project: &str, task: &str, cwd: &str) -> Result<String, String> {
             }),
         ),
     )?;
-    step(
-        "agent.prompt",
-        call_at(
-            &sock,
-            SUMMON_READ_TIMEOUT,
-            0,
-            "agent.prompt",
-            serde_json::json!({ "target": pane, "text": task }),
-        ),
-    )?;
+    step("agent.prompt", prompt_step(&sock, &pane, task))?;
     Ok(pane)
 }
 
@@ -605,6 +613,38 @@ mod tests {
         assert!(elapsed >= Duration::from_millis(30), "{elapsed:?}");
         assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
         assert!((2..=100).contains(&calls.get()), "{}", calls.get());
+    }
+
+    #[test]
+    fn pr5_prompt_step_retries_agent_prompt_request() {
+        let path = tmp_sock("pr5");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let h = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in [
+                b"{\"id\":\"shikigami-0\",\"error\":{\"code\":\"agent_not_ready\",\"message\":\"agent wD:pB is not an active named agent\"}}\n".as_slice(),
+                b"{\"id\":\"shikigami-0\",\"result\":{\"ok\":true}}\n".as_slice(),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut req = String::new();
+                BufReader::new(stream.try_clone().unwrap()).read_line(&mut req).unwrap();
+                requests.push(serde_json::from_str::<Value>(&req).unwrap());
+                stream.write_all(response).unwrap();
+            }
+            requests
+        });
+        let got = prompt_step(&path, "wD:pB", "跑測試");
+        let requests = h.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got.unwrap(), serde_json::json!({"ok": true}));
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(request["method"], "agent.prompt");
+            assert_eq!(
+                request["params"],
+                serde_json::json!({"target": "wD:pB", "text": "跑測試"})
+            );
+        }
     }
 
     /// T4 — the whole chain against a live herdr, on a real project directory.
