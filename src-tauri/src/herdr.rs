@@ -142,6 +142,11 @@ const PROMPT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// each retry attempt the 150s summon read timeout would let the last attempt
 /// push the give-up time to ~270s, well past the 120s budget.
 const PROMPT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a fresh tab may take to reach an idle shell prompt. Measured at
+/// 2–5s with this fish config; the budget also covers agent.start's own
+/// `agent_pane_busy` retries.
+const SHELL_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// herdr keeps one agent per name for as long as the pane lives, so naming a
 /// summoned agent after its project alone meant the second summon of that
@@ -160,15 +165,18 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn is_agent_not_ready(err: &str) -> bool {
-    err.contains("\"code\":\"agent_not_ready\"")
-}
-
-fn prompt_until_accepted<F: FnMut() -> Result<Value, String>>(
+/// Retry one herdr call for as long as it keeps failing with a single expected
+/// error code, then report which step gave up. Matching the quoted `"code":"…"`
+/// pair rather than the bare token keeps a message body that merely mentions the
+/// code from being mistaken for the code itself.
+fn retry_while<F: FnMut() -> Result<Value, String>>(
+    step: &str,
+    code: &str,
     deadline: Duration,
     interval: Duration,
     mut send: F,
 ) -> Result<Value, String> {
+    let expected = format!("\"code\":\"{code}\"");
     let start = Instant::now();
     let mut attempts = 0;
     // The deadline is checked after the sleep, never after the send: a send is
@@ -179,7 +187,7 @@ fn prompt_until_accepted<F: FnMut() -> Result<Value, String>>(
         attempts += 1;
         match send() {
             Ok(result) => return Ok(result),
-            Err(err) if !is_agent_not_ready(&err) => return Err(err),
+            Err(err) if !err.contains(&expected) => return Err(err),
             Err(err) => {
                 std::thread::sleep(interval);
                 if start.elapsed() >= deadline {
@@ -189,9 +197,74 @@ fn prompt_until_accepted<F: FnMut() -> Result<Value, String>>(
         }
     };
     Err(format!(
-        "agent.prompt still rejected as agent_not_ready after {}ms ({attempts} attempts); last error: {last_err}",
+        "{step} still rejected as {code} after {}ms ({attempts} attempts); last error: {last_err}",
         start.elapsed().as_millis()
     ))
+}
+
+fn prompt_until_accepted<F: FnMut() -> Result<Value, String>>(
+    deadline: Duration,
+    interval: Duration,
+    send: F,
+) -> Result<Value, String> {
+    retry_while("agent.prompt", "agent_not_ready", deadline, interval, send)
+}
+
+/// A pane is only startable once its shell is back at the prompt. A freshly
+/// created tab is not: fish runs its config first, so for a second or two the
+/// pane's foreground process is a startup child (`cut`, `cat`, …) rather than
+/// the shell itself — measured against herdr 0.8.0 on 2026-08-12, the pane
+/// flipped busy → idle → busy again before settling.
+fn shell_is_idle(info: &Value) -> bool {
+    let p = &info["process_info"];
+    let Some(shell) = p["shell_pid"].as_u64() else { return false };
+    let Some(fg) = p["foreground_processes"].as_array() else { return false };
+    fg.len() == 1 && fg[0]["pid"].as_u64() == Some(shell)
+}
+
+/// Poll until the pane's shell is idle. Probe errors are retried, not fatal —
+/// a pane herdr has not registered yet answers `agent_pane_not_found`.
+fn wait_for_shell<F: FnMut() -> Result<Value, String>>(
+    deadline: Duration,
+    interval: Duration,
+    mut probe: F,
+) -> Result<(), String> {
+    let start = Instant::now();
+    let mut last: String;
+    loop {
+        match probe() {
+            Ok(info) if shell_is_idle(&info) => return Ok(()),
+            Ok(_) => last = "shell still busy with its startup".to_string(),
+            Err(err) => last = err,
+        }
+        std::thread::sleep(interval);
+        if start.elapsed() >= deadline {
+            return Err(format!(
+                "pane never reached an idle shell prompt within {}ms; last probe: {last}",
+                start.elapsed().as_millis()
+            ));
+        }
+    }
+}
+
+/// herdr answers `agent.start` on a pane whose shell is not up yet by deferring
+/// the launch — `ok` with `launch_pending: true`. It does start the agent, but
+/// the launch never completes: the name stays out of the agent registry, so
+/// every later `agent.prompt` is refused with `agent_not_ready`, forever
+/// (measured 2026-08-12: 238 retries over 120s, then still pending minutes
+/// later). There is no way back from that branch, so treat it as the failure it
+/// is instead of retrying a prompt that cannot be accepted.
+fn launch_completed(result: &Value) -> Result<(), String> {
+    let pending = result["launch_pending"].as_bool().unwrap_or(false)
+        || result["agent"]["launch_pending"].as_bool().unwrap_or(false);
+    if pending {
+        return Err(
+            "herdr deferred the launch (launch_pending) — the pane's shell was not ready, so the \
+             agent starts unnamed and will never accept a prompt"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn prompt_step(sock: &std::path::Path, pane: &str, task: &str) -> Result<Value, String> {
@@ -233,7 +306,7 @@ fn step(stage: &str, result: Result<Value, String>) -> Result<Value, String> {
 /// headless spawn). Returns the new pane id, so the caller can name or focus
 /// the agent it just summoned.
 /// Wire shapes verified against the bundled schema of the installed herdr
-/// (`herdr api schema --json`, protocol 17): agent.start takes `pane_id`, and
+/// (`herdr api schema --json`, protocol 19): agent.start takes `pane_id`, and
 /// agent.wait takes `target`/`until`/`timeout_ms`.
 pub fn summon(project: &str, task: &str, cwd: &str) -> Result<String, String> {
     let sock = socket_path();
@@ -249,20 +322,44 @@ pub fn summon(project: &str, task: &str, cwd: &str) -> Result<String, String> {
     )?;
     let pane = extract_pane_id(&tab)?;
     step(
+        "pane.process_info",
+        wait_for_shell(SHELL_READY_TIMEOUT, SHELL_POLL_INTERVAL, || {
+            call_at(
+                &sock,
+                CALL_TIMEOUT,
+                0,
+                "pane.process_info",
+                serde_json::json!({ "pane_id": pane }),
+            )
+        })
+        .map(|_| Value::Null),
+    )?;
+    // No `timeout_ms`: herdr's CLI omits it and the call then completes the
+    // launch synchronously — name registered, ready for a prompt. The retry
+    // covers the pane flipping back to busy between our probe and this call.
+    let started = step(
         "agent.start",
-        call_at(
-            &sock,
-            SUMMON_READ_TIMEOUT,
-            0,
+        retry_while(
             "agent.start",
-            serde_json::json!({
-                "name": agent_name(project, now_secs()),
-                "kind": "claude",
-                "pane_id": pane,
-                "timeout_ms": SUMMON_TIMEOUT_MS,
-            }),
+            "agent_pane_busy",
+            SHELL_READY_TIMEOUT,
+            PROMPT_RETRY_INTERVAL,
+            || {
+                call_at(
+                    &sock,
+                    SUMMON_READ_TIMEOUT,
+                    0,
+                    "agent.start",
+                    serde_json::json!({
+                        "name": agent_name(project, now_secs()),
+                        "kind": "claude",
+                        "pane_id": pane,
+                    }),
+                )
+            },
         ),
     )?;
+    step("agent.start", launch_completed(&started).map(|_| Value::Null))?;
     step(
         "agent.wait",
         call_at(
@@ -647,6 +744,75 @@ mod tests {
     /// The bound the give-up time relies on: with a coarse interval the old
     /// shape woke up past the deadline and still issued one more send, which
     /// then got a full read timeout to run in.
+    fn proc_info(fg: Value, shell: u64) -> Value {
+        serde_json::json!({
+            "process_info": { "shell_pid": shell, "foreground_processes": fg }
+        })
+    }
+
+    #[test]
+    fn sh1_only_the_shell_alone_in_the_foreground_counts_as_idle() {
+        assert!(shell_is_idle(&proc_info(serde_json::json!([{"pid": 89527, "name": "fish"}]), 89527)));
+        // fish running its config: the foreground is a startup child
+        assert!(!shell_is_idle(&proc_info(serde_json::json!([{"pid": 89600, "name": "cut"}]), 89527)));
+        assert!(!shell_is_idle(&proc_info(serde_json::json!([]), 89527)));
+        assert!(!shell_is_idle(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn sh2_waits_through_busy_probes_and_probe_errors() {
+        let calls = std::cell::Cell::new(0usize);
+        let got = wait_for_shell(Duration::from_secs(1), Duration::from_millis(1), || {
+            calls.set(calls.get() + 1);
+            match calls.get() {
+                1 => Err("herdr pane.process_info: {\"code\":\"agent_pane_not_found\"}".to_string()),
+                2 => Ok(proc_info(serde_json::json!([{"pid": 2, "name": "cut"}]), 1)),
+                _ => Ok(proc_info(serde_json::json!([{"pid": 1, "name": "fish"}]), 1)),
+            }
+        });
+        assert!(got.is_ok(), "{got:?}");
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn sh3_timeout_says_what_the_pane_was_doing() {
+        let err = wait_for_shell(Duration::from_millis(30), Duration::from_millis(5), || {
+            Ok(proc_info(serde_json::json!([{"pid": 2, "name": "cat"}]), 1))
+        })
+        .unwrap_err();
+        assert!(err.contains("idle shell prompt"), "{err}");
+        assert!(err.contains("shell still busy"), "{err}");
+    }
+
+    #[test]
+    fn st1_agent_start_retries_while_the_pane_is_busy() {
+        let calls = std::cell::Cell::new(0usize);
+        let got = retry_while(
+            "agent.start",
+            "agent_pane_busy",
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    Err("herdr agent.start: {\"code\":\"agent_pane_busy\",\"message\":\"not an available shell\"}".to_string())
+                } else {
+                    Ok(serde_json::json!({"ok": true}))
+                }
+            },
+        );
+        assert_eq!(got.unwrap(), serde_json::json!({"ok": true}));
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn st2_a_deferred_launch_is_a_failure_not_something_to_wait_out() {
+        let err = launch_completed(&serde_json::json!({"agent": {"launch_pending": true}})).unwrap_err();
+        assert!(err.contains("launch_pending"), "{err}");
+        assert!(launch_completed(&serde_json::json!({"launch_pending": true})).is_err());
+        assert!(launch_completed(&serde_json::json!({"agent": {"name": "shikigami-0816"}})).is_ok());
+    }
+
     #[test]
     fn an1_agent_name_carries_the_project_and_a_four_digit_clock() {
         assert_eq!(agent_name("shikigami", 1_786_000_123), "shikigami-0123");
