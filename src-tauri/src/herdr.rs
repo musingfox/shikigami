@@ -90,6 +90,34 @@ fn call_at(
         .ok_or_else(|| format!("herdr {method}: no result"))
 }
 
+/// Read the last 40 lines rendered in a pane. Herdr strips terminal control
+/// sequences; this adapter only validates and returns its text field.
+pub fn pane_recent_text(pane: &str) -> Result<String, String> {
+    pane_recent_text_at(&socket_path(), pane)
+}
+
+fn pane_recent_text_at(sock: &std::path::Path, pane: &str) -> Result<String, String> {
+    let result = call_at(
+        sock,
+        CALL_TIMEOUT,
+        0,
+        "pane.read",
+        serde_json::json!({
+            "pane_id": pane,
+            "source": "recent",
+            "lines": 40,
+            "format": "text",
+            "strip_ansi": true
+        }),
+    )?;
+    result
+        .get("read")
+        .and_then(|read| read.get("text"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "herdr pane.read: missing read.text".to_string())
+}
+
 /// Normalize an `agent.list` result into core AgentEntry rows.
 pub fn parse_agent_list(result: &Value) -> Vec<AgentEntry> {
     result
@@ -640,6 +668,72 @@ mod tests {
         let p = std::env::temp_dir().join(format!("shk-{tag}.sock"));
         let _ = std::fs::remove_file(&p); // a stale file from a past run means AddrInUse
         p
+    }
+
+    fn pane_read_server(tag: &str, response: &'static [u8]) -> (std::path::PathBuf, std::thread::JoinHandle<Value>) {
+        let path = tmp_sock(tag);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut req = String::new();
+            BufReader::new(stream.try_clone().unwrap()).read_line(&mut req).unwrap();
+            stream.write_all(response).unwrap();
+            serde_json::from_str(&req).unwrap()
+        });
+        (path, handle)
+    }
+
+    #[test]
+    fn pane_read_returns_recent_plain_text_verbatim() {
+        let (path, server) = pane_read_server(
+            "pane-read-ok",
+            b"{\"result\":{\"type\":\"pane_read\",\"read\":{\"pane_id\":\"wD:p1\",\"source\":\"recent\",\"format\":\"text\",\"text\":\"299\\n300\\n\",\"revision\":1,\"truncated\":false}}}\n",
+        );
+        let got = pane_recent_text_at(&path, "wD:p1");
+        let request = server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got.unwrap(), "299\n300\n");
+        assert_eq!(request["method"], "pane.read");
+        assert_eq!(
+            request["params"],
+            serde_json::json!({
+                "pane_id": "wD:p1",
+                "source": "recent",
+                "lines": 40,
+                "format": "text",
+                "strip_ansi": true
+            })
+        );
+    }
+
+    #[test]
+    fn pane_read_surfaces_server_error() {
+        let (path, server) =
+            pane_read_server("pane-read-error", b"{\"error\":{\"code\":\"pane_not_found\"}}\n");
+        let err = pane_recent_text_at(&path, "wD:p1").unwrap_err();
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("pane.read"), "{err}");
+        assert!(err.contains("pane_not_found"), "{err}");
+    }
+
+    #[test]
+    fn pane_read_rejects_missing_text() {
+        let (path, server) =
+            pane_read_server("pane-read-shape", b"{\"result\":{\"type\":\"pane_read\"}}\n");
+        let err = pane_recent_text_at(&path, "wD:p1").unwrap_err();
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("pane.read"), "{err}");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_pane_read_returns_ansi_free_text() {
+        let listed = call(0, "agent.list", serde_json::json!({})).expect("agent.list");
+        let pane = listed["agents"][0]["pane_id"].as_str().expect("first agent pane");
+        let text = pane_recent_text(pane).expect("pane.read");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
     }
 
     #[test]
