@@ -144,6 +144,14 @@ mod tests {
         assert_eq!(normalize("   \n\n\t\n", 5, 100), "");
     }
 
+    // Terminal output is blank-line dense; without collapsing, the 12-line
+    // budget is spent on emptiness instead of the lines that carry signal.
+    #[test]
+    fn collapses_runs_of_blank_lines() {
+        assert_eq!(normalize("a\n\n\n\nb", 5, 100), "a\n\nb");
+        assert_eq!(normalize("a\n  \n\t\nb", 5, 100), "a\n\nb");
+    }
+
     #[test]
     fn unchanged_input_has_no_ellipsis() {
         assert_eq!(normalize("a\nb", 5, 100), "a\nb");
@@ -175,6 +183,21 @@ pub fn normalize(input: &str, max_lines: usize, max_chars: usize) -> String {
     while lines.last().is_some_and(|line| line.trim().is_empty()) {
         lines.pop();
     }
+    // A run of blank lines carries one bit of information — that there was a
+    // break — so it costs one line of the budget, not however many the terminal
+    // happened to print.
+    let mut collapsed: Vec<&str> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.trim().is_empty() {
+            if collapsed.last().is_some_and(|prev| prev.is_empty()) {
+                continue;
+            }
+            collapsed.push("");
+        } else {
+            collapsed.push(line);
+        }
+    }
+    let mut lines = collapsed;
     if lines.is_empty() || max_lines == 0 || max_chars == 0 {
         return String::new();
     }
