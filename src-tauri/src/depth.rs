@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::{collect_with, normalize, select_panes, AgentDepth, PreciseDepth};
+    use super::{collect_with, normalize, roster_and_depth_with, select_panes, AgentDepth, PreciseDepth};
     use crate::cchooks::HookDepth;
     use crate::events::AgentEntry;
     use std::cell::Cell;
@@ -82,6 +82,40 @@ mod tests {
         let detail = &got[0].precise.as_ref().unwrap().detail;
         assert_eq!(detail.chars().count(), 200);
         assert!(detail.starts_with('…'));
+    }
+
+    #[test]
+    fn blank_transcript_touches_no_socket() {
+        let got = roster_and_depth_with(
+            "   \n ",
+            || panic!("roster must not be fetched for a misfired PTT"),
+            |_| panic!("depth must not be collected for a misfired PTT"),
+        );
+        assert_eq!(got, (vec![], vec![]));
+    }
+
+    #[test]
+    fn real_transcript_gathers_roster_then_depth() {
+        let roster = vec![agent("p1", "blocked")];
+        let expected = roster.clone();
+        let (got_roster, got_depth) = roster_and_depth_with(
+            "builder 卡在什麼",
+            move || roster.clone(),
+            |r| {
+                assert_eq!(r.len(), 1);
+                vec![AgentDepth { pane: r[0].pane.clone(), precise: None, screen: Some("x".into()) }]
+            },
+        );
+        assert_eq!(got_roster, expected);
+        assert_eq!(got_depth[0].screen.as_deref(), Some("x"));
+    }
+
+    // C1: the gathering lib.rs performs has to be movable onto a blocking
+    // thread; this pins the Send + 'static bound that lets spawn_blocking take it.
+    #[test]
+    fn gathering_is_offloadable_to_a_blocking_thread() {
+        let handle = std::thread::spawn(|| roster_and_depth_with("hi", Vec::new, |_| Vec::new()));
+        assert_eq!(handle.join().unwrap(), (vec![], vec![]));
     }
 
     // Contract line budgets: precise 6 lines / 200 chars, screen 12 / 600.
@@ -351,6 +385,28 @@ where
 
 pub(crate) fn collect(roster: &[AgentEntry]) -> Vec<AgentDepth> {
     collect_with(roster, crate::cchooks::depth_for, crate::herdr::pane_recent_text)
+}
+
+/// Roster + depth for one utterance, or nothing at all when there is no
+/// question to ground. A misfired PTT (silence in, empty transcript out) is
+/// rejected downstream anyway, and it must not cost a roster call plus up to
+/// three 5s pane reads first. Both fetchers are blocking sockets — call this
+/// from a blocking thread, never straight off the async executor.
+pub(crate) fn roster_and_depth_with<R, C>(
+    transcript: &str,
+    roster_for: R,
+    depth_for: C,
+) -> (Vec<AgentEntry>, Vec<AgentDepth>)
+where
+    R: FnOnce() -> Vec<AgentEntry>,
+    C: FnOnce(&[AgentEntry]) -> Vec<AgentDepth>,
+{
+    if transcript.trim().is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let roster = roster_for();
+    let depth = depth_for(&roster);
+    (roster, depth)
 }
 
 fn normalize_precise(input: &str) -> String {

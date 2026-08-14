@@ -84,8 +84,14 @@ async fn process_utterance(
         .map_err(|e| format!("stt: {e}"))?
         .map_err(|e| format!("stt: {e}"))?;
     let _ = app.emit(events::VOICE_TRANSCRIPT, transcript.clone());
-    let roster = herdr::get_roster();
-    let depth = depth::collect(&roster);
+    // Roster + depth are blocking herdr socket calls (up to 3 pane reads at
+    // CALL_TIMEOUT each), so they go off the executor exactly like STT above.
+    let asked = transcript.clone();
+    let (roster, depth) = tauri::async_runtime::spawn_blocking(move || {
+        depth::roster_and_depth_with(&asked, herdr::get_roster, depth::collect)
+    })
+    .await
+    .map_err(|e| format!("brain: {e}"))?;
     let reply = voice::reply_to_transcript(&transcript, &roster, &depth)
         .await
         .map_err(|e| format!("brain: {e}"))?;
