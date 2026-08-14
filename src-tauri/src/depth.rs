@@ -1,16 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use super::{normalize, select_panes};
+    use super::{collect_with, normalize, select_panes, AgentDepth, PreciseDepth};
+    use crate::cchooks::HookDepth;
     use crate::events::AgentEntry;
+    use std::cell::Cell;
 
     fn agent(pane: &str, status: &str) -> AgentEntry {
         AgentEntry {
-            id: pane.to_string(),
-            name: pane.to_string(),
-            pane: pane.to_string(),
-            status: status.to_string(),
-            title: String::new(),
-            cwd: String::new(),
+            id: pane.into(), name: pane.into(), pane: pane.into(), status: status.into(),
+            title: String::new(), cwd: String::new(),
         }
     }
 
@@ -18,52 +16,112 @@ mod tests {
         move |pane| panes.contains(&pane)
     }
 
+    fn hook(pane: &str, detail: &str) -> HookDepth {
+        HookDepth { pane: pane.into(), label: "stop".into(), detail: detail.into(), ts: "t".into() }
+    }
+
+    #[test]
+    fn collects_screen_for_blocked_without_precise_depth() {
+        let reads = Cell::new(0);
+        let got = collect_with(&[agent("p1", "blocked")], |_| None, |_| {
+            reads.set(reads.get() + 1);
+            Ok("x\ny".to_string())
+        });
+        assert_eq!(reads.get(), 1);
+        assert_eq!(got, vec![AgentDepth {
+            pane: "p1".into(),
+            precise: None,
+            screen: Some("x\ny".into()),
+        }]);
+    }
+
+    #[test]
+    fn retains_precise_depth_when_screen_read_fails() {
+        let reads = Cell::new(0);
+        let got = collect_with(&[agent("p1", "blocked")], |_| Some(hook("p1", "卡在權限")), |_| {
+            reads.set(reads.get() + 1);
+            Err("herdr pane.read: unavailable".into())
+        });
+        assert_eq!(reads.get(), 1);
+        assert_eq!(got[0].precise, Some(PreciseDepth {
+            label: "stop".into(),
+            detail: "卡在權限".into(),
+        }));
+        assert_eq!(got[0].screen, None);
+    }
+
+    #[test]
+    fn idle_without_hook_is_empty_and_does_not_read() {
+        let reads = Cell::new(0);
+        let got = collect_with(&[agent("p1", "idle")], |_| None, |_| {
+            reads.set(reads.get() + 1); Ok("unexpected".into())
+        });
+        assert!(got.is_empty());
+        assert_eq!(reads.get(), 0);
+    }
+
+    #[test]
+    fn precise_budget_keeps_first_ten_and_blocks_screens() {
+        let roster: Vec<_> = (0..11).map(|i| agent(&format!("p{i}"), "working")).collect();
+        let reads = Cell::new(0);
+        let got = collect_with(&roster, |pane| Some(hook(pane, &"x".repeat(200))), |_| {
+            reads.set(reads.get() + 1); Ok("screen".into())
+        });
+        assert_eq!(got.len(), 10);
+        assert_eq!(got.iter().map(|a| a.pane.as_str()).collect::<Vec<_>>(),
+            (0..10).map(|i| format!("p{i}")).collect::<Vec<_>>().iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(reads.get(), 0);
+        assert!(got.iter().all(|depth| depth.screen.is_none()));
+    }
+
+    #[test]
+    fn precise_detail_is_unicode_safe_and_capped() {
+        let got = collect_with(&[agent("p1", "blocked")], |_| Some(hook("p1", &"界".repeat(10_000))), |_| {
+            Ok("screen".into())
+        });
+        let detail = &got[0].precise.as_ref().unwrap().detail;
+        assert_eq!(detail.chars().count(), 200);
+        assert!(detail.starts_with('…'));
+    }
+
     #[test]
     fn selects_blocked_without_precise_depth() {
-        let roster = [agent("%1", "blocked")];
-        assert_eq!(select_panes(&roster, precise(&[])), vec!["%1"]);
+        let roster = vec![agent("p1", "blocked")];
+        assert_eq!(select_panes(&roster, precise(&[])), vec!["p1"]);
     }
 
     #[test]
     fn selects_working_without_precise_depth() {
-        let roster = [agent("%1", "working")];
-        assert_eq!(select_panes(&roster, precise(&[])), vec!["%1"]);
+        let roster = vec![agent("p1", "working")];
+        assert_eq!(select_panes(&roster, precise(&[])), vec!["p1"]);
     }
 
     #[test]
     fn selects_idle_with_precise_depth() {
-        let roster = [agent("%1", "idle")];
-        assert_eq!(select_panes(&roster, precise(&["%1"])), vec!["%1"]);
+        let roster = vec![agent("p1", "idle")];
+        assert_eq!(select_panes(&roster, precise(&["p1"])), vec!["p1"]);
     }
 
     #[test]
     fn excludes_idle_done_and_unknown_without_precise_depth() {
-        let roster = [
-            agent("%1", "idle"),
-            agent("%2", "done"),
-            agent("%3", "unknown"),
-        ];
+        let roster = vec![agent("i", "idle"), agent("d", "done"), agent("u", "unknown")];
         assert!(select_panes(&roster, precise(&[])).is_empty());
     }
 
     #[test]
     fn excludes_empty_pane() {
-        let roster = [agent("", "blocked")];
-        assert!(select_panes(&roster, precise(&[])).is_empty());
+        assert!(select_panes(&[agent("", "blocked")], precise(&[])).is_empty());
     }
 
     #[test]
     fn preserves_order_and_caps_at_three() {
-        let roster = [
+        let roster = vec![
             agent("p1", "blocked"),
             agent("p2", "blocked"),
             agent("p3", "working"),
             agent("p4", "blocked"),
         ];
-        assert_eq!(
-            select_panes(&roster, precise(&[])),
-            vec!["p1", "p2", "p3"]
-        );
+        assert_eq!(select_panes(&roster, precise(&[])), vec!["p1", "p2", "p3"]);
     }
 
     #[test]
@@ -161,4 +219,82 @@ fn strip_ansi_and_controls(input: &str) -> String {
         }
     }
     output
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreciseDepth {
+    pub label: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentDepth {
+    pub pane: String,
+    pub precise: Option<PreciseDepth>,
+    pub screen: Option<String>,
+}
+
+pub(crate) fn collect_with<PF, SF>(
+    roster: &[AgentEntry],
+    mut precise_for: PF,
+    mut screen_for: SF,
+) -> Vec<AgentDepth>
+where
+    PF: FnMut(&str) -> Option<crate::cchooks::HookDepth>,
+    SF: FnMut(&str) -> Result<String, String>,
+{
+    let mut depths = Vec::with_capacity(roster.len());
+    let mut running = 0;
+    for agent in roster {
+        let precise = precise_for(&agent.pane).map(|depth| PreciseDepth {
+            label: normalize_precise(&depth.label),
+            detail: normalize_precise(&depth.detail),
+        });
+        if let Some(depth) = &precise {
+            let chars = depth.detail.chars().count();
+            if running + chars > 2000 {
+                return depths;
+            }
+            running += chars;
+        }
+        depths.push(AgentDepth {
+            pane: agent.pane.clone(),
+            precise,
+            screen: None,
+        });
+    }
+
+    let selected = select_panes(roster, |pane| {
+        depths.iter().any(|depth| depth.pane == pane && depth.precise.is_some())
+    });
+    for pane in selected {
+        if let Ok(text) = screen_for(&pane) {
+            let screen = normalize(&text, 20, 600);
+            let chars = screen.chars().count();
+            if running + chars > 2000 {
+                break;
+            }
+            if !screen.is_empty() {
+                running += chars;
+                if let Some(depth) = depths.iter_mut().find(|depth| depth.pane == pane) {
+                    depth.screen = Some(screen);
+                }
+            }
+        }
+    }
+    depths.retain(|depth| depth.precise.is_some() || depth.screen.is_some());
+    depths
+}
+
+pub(crate) fn collect(roster: &[AgentEntry]) -> Vec<AgentDepth> {
+    collect_with(roster, crate::cchooks::depth_for, crate::herdr::pane_recent_text)
+}
+
+fn normalize_precise(input: &str) -> String {
+    let normalized = normalize(input, usize::MAX, 200);
+    if normalized.chars().count() > 200 {
+        let tail: String = normalized.chars().skip(normalized.chars().count() - 199).collect();
+        format!("…{tail}")
+    } else {
+        normalized
+    }
 }
