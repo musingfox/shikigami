@@ -207,7 +207,7 @@ fn render_roster(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
         return "目前沒有觀測到 agent。".to_string();
     }
     let mut out = String::from(
-        "目前觀測到的 agent（狀態詞彙：idle 閒置｜working 工作中｜blocked 受阻｜done 完成｜unknown 未知）：",
+        "目前觀測到的 agent（狀態為 herdr 從終端機畫面推測；詞彙：idle 閒置｜working 工作中｜blocked 受阻｜done 完成｜unknown 未知）：",
     );
     for e in roster {
         out.push('\n');
@@ -579,6 +579,28 @@ mod tests {
         let out = system_prompt(&[], &[]);
         assert!(out.contains("語音辨識"));
         assert!(out.contains("相近"));
+    }
+
+    // RosterStatusProvenance contract
+    #[test]
+    fn rsp_t1_nonempty_roster_marks_status_as_screen_inference() {
+        let out = render_roster(&[agent("x", "working", "", "")], &[]);
+        assert!(out.contains("畫面推測"));
+        assert!(out.contains("idle"));
+        assert!(out.contains("blocked"));
+    }
+
+    #[test]
+    fn rsp_t2_empty_roster_stays_verbatim() {
+        assert_eq!(render_roster(&[], &[]), "目前沒有觀測到 agent。");
+        assert!(!render_roster(&[], &[]).contains("畫面推測"));
+    }
+
+    #[test]
+    fn rsp_t3_only_agent_row_uses_roster_bullet() {
+        let out = render_roster(&[agent("solo", "idle", "", "")], &[]);
+        let bullet_lines: Vec<_> = out.lines().filter(|line| line.starts_with("- ")).collect();
+        assert_eq!(bullet_lines, ["- solo（idle）"]);
     }
     // AgentDepthPromptBlock contract
     #[test]
