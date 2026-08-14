@@ -60,10 +60,18 @@ pub fn parse_depth(line: &str) -> Option<HookDepth> {
     let v: Value = serde_json::from_str(line).ok()?;
     let kind = v.get("kind")?.as_str()?;
     let pane = v.get("pane")?.as_str()?;
+    // An unattributed depth would be filed under key "" and then handed out to
+    // every roster row whose pane is also empty — someone else's depth.
+    if pane.trim().is_empty() {
+        return None;
+    }
     let payload = v.get("payload")?;
     let (label, detail) = match kind {
         "notification" => (
-            payload.get("notification_type")?.as_str()?,
+            payload
+                .get("notification_type")
+                .or_else(|| payload.get("notificationType"))?
+                .as_str()?,
             payload.get("message")?.as_str()?,
         ),
         "stop" => (
@@ -75,6 +83,11 @@ pub fn parse_depth(line: &str) -> Option<HookDepth> {
         ),
         _ => return None,
     };
+    // A blank precise signal is worse than none: it would still outrank the
+    // screen excerpt at collection time and leave the brain with nothing.
+    if detail.trim().is_empty() {
+        return None;
+    }
     Some(HookDepth {
         pane: pane.into(),
         label: label.into(),
@@ -250,6 +263,36 @@ mod tests {
                 ts: "2026-07-23T10:00:00Z".into(),
             })
         );
+    }
+
+    // Live spool shape: 28 of these carry notificationType (camelCase) and were
+    // being dropped whole, so every elicitation/permission prompt went unseen.
+    #[test]
+    fn depth_accepts_camel_case_notification_type() {
+        let line = r#"{"kind":"notification","pane":"wT:p1","ts":"T","payload":{"sessionId":"s","message":"User question requested","notificationType":"elicitation_dialog"}}"#;
+        assert_eq!(
+            parse_depth(line),
+            Some(HookDepth {
+                pane: "wT:p1".into(),
+                label: "elicitation_dialog".into(),
+                detail: "User question requested".into(),
+                ts: "T".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn depth_rejects_blank_detail() {
+        let line = r#"{"kind":"stop","pane":"p1","ts":"T","payload":{"last_assistant_message":"   \n  "}}"#;
+        assert_eq!(parse_depth(line), None);
+        let notification = r#"{"kind":"notification","pane":"p1","ts":"T","payload":{"notification_type":"x","message":"\t"}}"#;
+        assert_eq!(parse_depth(notification), None);
+    }
+
+    #[test]
+    fn depth_rejects_empty_pane() {
+        let line = r#"{"kind":"stop","pane":"","ts":"T","payload":{"last_assistant_message":"done"}}"#;
+        assert_eq!(parse_depth(line), None);
     }
 
     #[test]
