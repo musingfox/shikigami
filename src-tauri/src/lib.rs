@@ -6,6 +6,7 @@ mod tray;
 mod brain;
 mod voice;
 mod stt;
+mod depth;
 use tauri::Emitter;
 use crate::events::VOICE_LISTENING;
 use std::path::{Path, PathBuf};
