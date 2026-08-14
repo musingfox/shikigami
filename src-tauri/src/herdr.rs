@@ -601,15 +601,26 @@ mod tests {
     }
 
     #[test]
-    fn t1_parse_maps_fields_and_name_fallbacks() {
-        let rows = parse_agent_list(&live_like_result());
+    fn t1_parse_maps_exact_six_field_roster_shape() {
         assert_eq!(
-            rows,
+            parse_agent_list(&live_like_result()),
             vec![
-                // name null → cwd basename; no title in source → ""
-                entry_full("term_a", "cyris", "wD:p1", "blocked", "", "/Users/x/workspace/cyris"),
-                // declared name wins; title from terminal_title_stripped
-                entry_full("term_b", "builder", "wT:p1", "working", "設計 1:1:N 架構", "/Users/x/workspace/shikigami"),
+                AgentEntry {
+                    id: "term_a".into(),
+                    name: "cyris".into(),
+                    pane: "wD:p1".into(),
+                    status: "blocked".into(),
+                    title: "".into(),
+                    cwd: "/Users/x/workspace/cyris".into(),
+                },
+                AgentEntry {
+                    id: "term_b".into(),
+                    name: "builder".into(),
+                    pane: "wT:p1".into(),
+                    status: "working".into(),
+                    title: "設計 1:1:N 架構".into(),
+                    cwd: "/Users/x/workspace/shikigami".into(),
+                },
             ]
         );
     }
@@ -630,11 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn t4_diff_no_change() {
-        let a = vec![entry("t", "n", "p", "idle")];
-        let (changed, transitions) = diff_roster(&a, &a.clone());
-        assert!(!changed);
-        assert!(transitions.is_empty());
+    fn t4_diff_identical_two_row_roster_has_no_changes() {
+        let roster = parse_agent_list(&live_like_result());
+        assert_eq!(diff_roster(&roster, &roster), (false, vec![]));
     }
 
     #[test]
