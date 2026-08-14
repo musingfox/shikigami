@@ -254,7 +254,7 @@ fn render_roster(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
 
 /// Base persona + a live roster block, sent in the system position so the
 /// model can name real working agents without the user transcript being touched.
-fn system_prompt(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
+pub(crate) fn system_prompt(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
     format!(
         "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。被問到 agent「卡在什麼」時，優先依精確訊號回答；只有畫面節錄時，回答中必須明說「從畫面看到」；沒有精確訊號或畫面節錄時，回答中必須明說「不知道」，不得用狀態詞推斷卡住原因。使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
         SYSTEM_PROMPT,
@@ -368,12 +368,16 @@ fn http_client() -> Client {
         .unwrap_or_else(|_| Client::new())
 }
 
-pub async fn ask(transcript: &str, roster: &[AgentEntry]) -> Result<String, String> {
+pub async fn ask(
+    transcript: &str,
+    roster: &[AgentEntry],
+    depth: &[AgentDepth],
+) -> Result<String, String> {
     // Snapshot prior turns BEFORE the call; commit this turn AFTER it resolves.
     // The current question never leaks into the history it is sent with, and a
     // failed turn (any path) is discarded by commit's Ok-only append.
     let history = history_snapshot();
-    let result = ask_once(transcript, roster, &[], &history).await;
+    let result = ask_once(transcript, roster, depth, &history).await;
     commit(transcript, &result);
     result
 }
@@ -1090,12 +1094,12 @@ mod tests {
         // run: <PROVIDER>_API_KEY=... cargo test sap9_live -- --ignored --nocapture
         let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_history();
-        let summon = tauri::async_runtime::block_on(ask("幫我開 cyris 跑測試", &[])).unwrap();
+        let summon = tauri::async_runtime::block_on(ask("幫我開 cyris 跑測試", &[], &[])).unwrap();
         println!("summon turn reply: {summon}");
         assert!(matches!(parse_action(&summon), SummonAction::Summon { .. }));
 
         reset_history();
-        let qa = tauri::async_runtime::block_on(ask("現在誰在工作", &[])).unwrap();
+        let qa = tauri::async_runtime::block_on(ask("現在誰在工作", &[], &[])).unwrap();
         println!("q&a turn reply: {qa}");
         assert!(matches!(parse_action(&qa), SummonAction::Speak(_)));
     }
@@ -1132,8 +1136,8 @@ mod tests {
     #[test]
     #[ignore]
     fn mtl1_live_two_turn_recall() {
-        // given #[ignore] live: ask("現在誰在工作", roster) names X, then
-        // ask("它在做什麼", same roster) -> both Ok non-empty and the 2nd answer
+        // given #[ignore] live: ask("現在誰在工作", roster, depth) names X, then
+        // ask("它在做什麼", same roster, depth) -> both Ok non-empty and the 2nd answer
         // contains X's name — manual: 附一次逐字稿為證。
         // run: <PROVIDER>_API_KEY=... cargo test mtl1_live -- --ignored
     }

@@ -84,7 +84,9 @@ async fn process_utterance(
         .map_err(|e| format!("stt: {e}"))?
         .map_err(|e| format!("stt: {e}"))?;
     let _ = app.emit(events::VOICE_TRANSCRIPT, transcript.clone());
-    let reply = voice::reply_to_transcript(&transcript, &herdr::get_roster())
+    let roster = herdr::get_roster();
+    let depth = depth::collect(&roster);
+    let reply = voice::reply_to_transcript(&transcript, &roster, &depth)
         .await
         .map_err(|e| format!("brain: {e}"))?;
     let action = brain::parse_action(&reply);

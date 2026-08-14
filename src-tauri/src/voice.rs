@@ -4,6 +4,7 @@
 
 use crate::brain::{self, SummonAction};
 use crate::events::AgentEntry;
+use crate::depth::AgentDepth;
 
 /// How one utterance ends — the two outcomes are mutually exclusive. A summon
 /// proposal is data for the confirm bar, never something to read out, so the
@@ -31,15 +32,15 @@ pub fn route(action: SummonAction, cwd: Option<String>) -> Utterance {
 }
 
 /// Each voice reply is grounded in the roster snapshot passed by the caller at
-/// call time, so "誰在工作" names the agents actually working right now.
 pub async fn reply_to_transcript(
     transcript: &str,
     roster: &[AgentEntry],
+    depth: &[AgentDepth],
 ) -> Result<String, String> {
     if transcript.trim().is_empty() {
         return Err("empty transcript".to_string());
     }
-    brain::ask(transcript, roster).await
+    brain::ask(transcript, roster, depth).await
 }
 
 use tauri_plugin_global_shortcut::ShortcutState;
@@ -160,20 +161,47 @@ mod tests {
         );
     }
 
-    // VoiceReplyUsesLiveRoster contract
+    // VoiceDepthPlumbing contract
     #[test]
-    fn vr1_empty_transcript_rejected_before_brain() {
-        let err = tauri::async_runtime::block_on(reply_to_transcript("", &[])).unwrap_err();
+    fn vdp_t1_empty_transcript_rejected_before_brain() {
+        let depth = [AgentDepth {
+            pane: "%1".into(),
+            precise: None,
+            screen: Some("must not trigger a brain request".into()),
+        }];
+        let err =
+            tauri::async_runtime::block_on(reply_to_transcript("   ", &[], &depth)).unwrap_err();
         assert_eq!(err, "empty transcript");
     }
 
-    // T2: live path (needs herdr + API key) — run with `cargo test -- --ignored`.
     #[test]
     #[ignore]
-    fn vr2_live_roster_answer_nonempty() {
+    fn vdp_t2_live_depth_reaches_single_brain_request() {
         let roster = crate::herdr::get_roster();
-        let reply =
-            tauri::async_runtime::block_on(reply_to_transcript("現在誰在工作", &roster)).unwrap();
+        let observed = roster
+            .iter()
+            .find(|agent| matches!(agent.status.as_str(), "blocked" | "working"))
+            .expect("live test needs one blocked or working agent");
+        let depth = crate::depth::collect(&roster);
+        let matched = depth
+            .iter()
+            .find(|item| item.pane == observed.pane)
+            .expect("live depth must join by the exact herdr pane_id");
+        assert!(matched.precise.is_some() || matched.screen.is_some());
+
+        let prompt = crate::brain::system_prompt(&roster, &depth);
+        println!(
+            "join receipt: HERDR_PANE_ID={} herdr pane_id={}\n\nsystem prompt:\n{}",
+            matched.pane, observed.pane, prompt
+        );
+        assert!(prompt.contains("精確訊號") || prompt.contains("畫面節錄"));
+
+        let reply = tauri::async_runtime::block_on(reply_to_transcript(
+            "它卡在什麼？",
+            &roster,
+            &depth,
+        ))
+        .unwrap();
         assert!(!reply.trim().is_empty());
     }
 }
