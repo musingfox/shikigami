@@ -11,6 +11,7 @@ use std::time::Duration;
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use crate::depth::{AgentDepth, PreciseDepth};
 use crate::events::AgentEntry;
 
 const SYSTEM_PROMPT: &str = "你是式神，使用者的桌面語音助理。用使用者說話的語言簡潔回答，最多兩句，純文字、不用 Markdown，內容要適合直接朗讀。直接給答案，不要輸出思考過程、前言或自我說明。";
@@ -201,7 +202,7 @@ fn detect() -> Result<(Provider, String), String> {
 
 /// Roster snapshot -> a model-readable Chinese text block. Empty roster states
 /// plainly that nothing is observed, so the model never invents an agent.
-fn render_roster(roster: &[AgentEntry]) -> String {
+fn render_roster(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
     if roster.is_empty() {
         return "目前沒有觀測到 agent。".to_string();
     }
@@ -225,17 +226,39 @@ fn render_roster(roster: &[AgentEntry]) -> String {
             out.push('：');
             out.push_str(&detail);
         }
+        if let Some(agent_depth) = depth.iter().find(|d| d.pane == e.pane) {
+            if let Some(PreciseDepth { label, detail }) = &agent_depth.precise {
+                out.push_str("\n  精確訊號：");
+                out.push_str(label);
+                out.push('：');
+                for (line_index, line) in detail.lines().enumerate() {
+                    if line_index > 0 {
+                        out.push_str("\n  ");
+                    }
+                    out.push_str(line);
+                }
+            }
+            if let Some(screen) = &agent_depth.screen {
+                out.push_str("\n  畫面節錄：");
+                for (line_index, line) in screen.lines().enumerate() {
+                    if line_index > 0 {
+                        out.push_str("\n  ");
+                    }
+                    out.push_str(line);
+                }
+            }
+        }
     }
     out
 }
 
 /// Base persona + a live roster block, sent in the system position so the
 /// model can name real working agents without the user transcript being touched.
-fn system_prompt(roster: &[AgentEntry]) -> String {
+fn system_prompt(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
     format!(
         "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
         SYSTEM_PROMPT,
-        render_roster(roster),
+        render_roster(roster, depth),
         SUMMON_INSTRUCTION
     )
 }
@@ -269,9 +292,10 @@ fn build_request(
     provider: Provider,
     transcript: &str,
     roster: &[AgentEntry],
+    depth: &[AgentDepth],
     history: &[(String, String)],
 ) -> Value {
-    let system = system_prompt(roster);
+    let system = system_prompt(roster, depth);
     match provider {
         Provider::Gemini => json!({
             "system_instruction": { "parts": [{ "text": system }] },
@@ -349,7 +373,7 @@ pub async fn ask(transcript: &str, roster: &[AgentEntry]) -> Result<String, Stri
     // The current question never leaks into the history it is sent with, and a
     // failed turn (any path) is discarded by commit's Ok-only append.
     let history = history_snapshot();
-    let result = ask_once(transcript, roster, &history).await;
+    let result = ask_once(transcript, roster, &[], &history).await;
     commit(transcript, &result);
     result
 }
@@ -357,11 +381,11 @@ pub async fn ask(transcript: &str, roster: &[AgentEntry]) -> Result<String, Stri
 async fn ask_once(
     transcript: &str,
     roster: &[AgentEntry],
+    depth: &[AgentDepth],
     history: &[(String, String)],
 ) -> Result<String, String> {
     let (provider, key) = detect()?;
-    let req = build_request(provider, transcript, roster, history);
-
+    let req = build_request(provider, transcript, roster, depth, history);
     let mut request = match provider {
         Provider::Gemini => http_client()
             .post(format!(
@@ -474,7 +498,7 @@ mod tests {
     // BrainReply contract tests (request/response per provider)
     #[test]
     fn t1_anthropic_request_shape() {
-        let v = build_request(Provider::Anthropic, "hi", &[], &[]);
+        let v = build_request(Provider::Anthropic, "hi", &[], &[], &[]);
         assert_eq!(v["model"], "claude-haiku-4-5");
         assert_eq!(v["max_tokens"], 300);
         assert_eq!(v["messages"][0]["role"], "user");
@@ -484,7 +508,7 @@ mod tests {
 
     #[test]
     fn t1b_gemini_request_shape() {
-        let v = build_request(Provider::Gemini, "hi", &[], &[]);
+        let v = build_request(Provider::Gemini, "hi", &[], &[], &[]);
         assert_eq!(v["contents"][0]["parts"][0]["text"], "hi");
         assert!(!v["system_instruction"]["parts"][0]["text"]
             .as_str()
@@ -496,7 +520,7 @@ mod tests {
 
     #[test]
     fn t1c_openai_request_shape() {
-        let v = build_request(Provider::OpenAi, "hi", &[], &[]);
+        let v = build_request(Provider::OpenAi, "hi", &[], &[], &[]);
         assert_eq!(v["model"], "gpt-4.1-mini");
         assert_eq!(v["max_completion_tokens"], 300);
         assert_eq!(v["messages"][0]["role"], "system");
@@ -519,7 +543,7 @@ mod tests {
     // RosterPromptBlock contract
     #[test]
     fn rp1_nonempty_row_carries_all_fields() {
-        let out = render_roster(&[agent("builder", "working", "設計 1:1:N 架構", "/x/shikigami")]);
+        let out = render_roster(&[agent("builder", "working", "設計 1:1:N 架構", "/x/shikigami")], &[]);
         assert!(out.contains("builder"));
         assert!(out.contains("working"));
         assert!(out.contains("設計 1:1:N 架構"));
@@ -528,21 +552,21 @@ mod tests {
 
     #[test]
     fn rp2_empty_roster_declares_no_observation() {
-        let out = render_roster(&[]);
+        let out = render_roster(&[], &[]);
         assert!(out.contains("沒有觀測到"));
         assert!(!out.contains("- "));
     }
 
     #[test]
     fn rp3_nonempty_includes_status_vocabulary() {
-        let out = render_roster(&[agent("x", "working", "", "")]);
+        let out = render_roster(&[agent("x", "working", "", "")], &[]);
         assert!(out.contains("idle"));
         assert!(out.contains("blocked"));
     }
 
     #[test]
     fn rp4_empty_fields_omitted_no_dangling() {
-        let out = render_roster(&[agent("solo", "idle", "", "")]);
+        let out = render_roster(&[agent("solo", "idle", "", "")], &[]);
         // the agent row carries only name+status, with no dangling detail
         // separator ("：" / " @ ") left behind by the empty title and cwd.
         let row = out.lines().find(|l| l.starts_with("- ")).unwrap();
@@ -552,20 +576,92 @@ mod tests {
 
     #[test]
     fn rp5_system_prompt_instructs_stt_fuzzy_match() {
-        let out = system_prompt(&[]);
+        let out = system_prompt(&[], &[]);
         assert!(out.contains("語音辨識"));
         assert!(out.contains("相近"));
+    }
+    // AgentDepthPromptBlock contract
+    #[test]
+    fn adpb_t1_empty_depth_preserves_existing_rows() {
+        let out = render_roster(&[agent("builder", "blocked", "t", "/x")], &[]);
+        let row_start = out.find("- ").unwrap();
+        assert_eq!(&out[row_start..], "- builder（blocked）：t @ /x");
+    }
+
+    #[test]
+    fn adpb_t2_precise_depth_is_labeled_and_not_a_roster_row() {
+        let out = render_roster(
+            &[agent("builder", "blocked", "t", "/x")],
+            &[AgentDepth {
+                pane: "%1".into(),
+                precise: Some(PreciseDepth {
+                    label: "permission_prompt".into(),
+                    detail: "Claude needs your permission".into(),
+                }),
+                screen: None,
+            }],
+        );
+        assert!(out.contains("精確訊號"));
+        assert!(out.contains("permission_prompt"));
+        assert!(out.contains("Claude needs your permission"));
+        let depth_line = out.lines().find(|line| line.contains("精確訊號")).unwrap();
+        assert!(!depth_line.starts_with("- "));
+    }
+
+    #[test]
+    fn adpb_t3_screen_depth_is_labeled() {
+        let out = render_roster(
+            &[agent("builder", "blocked", "", "")],
+            &[AgentDepth {
+                pane: "%1".into(),
+                precise: None,
+                screen: Some("cargo test\nerror[E0308]".into()),
+            }],
+        );
+        assert!(out.contains("畫面節錄"));
+        assert!(out.contains("error[E0308]"));
+    }
+
+    #[test]
+    fn adpb_t4_unmatched_depth_is_omitted() {
+        let out = render_roster(
+            &[agent("builder", "blocked", "", "")],
+            &[AgentDepth {
+                pane: "沒這個 pane".into(),
+                precise: Some(PreciseDepth {
+                    label: "missing".into(),
+                    detail: "must not appear".into(),
+                }),
+                screen: None,
+            }],
+        );
+        assert!(!out.contains("must not appear"));
+    }
+
+    #[test]
+    fn adpb_t5_request_carries_depth_in_system_only() {
+        let v = build_request(
+            Provider::Anthropic,
+            "hi",
+            &[agent("builder", "blocked", "", "")],
+            &[AgentDepth {
+                pane: "%1".into(),
+                precise: Some(PreciseDepth {
+                    label: "permission_prompt".into(),
+                    detail: "Claude needs your permission".into(),
+                }),
+                screen: None,
+            }],
+            &[],
+        );
+        assert!(v["system"].as_str().unwrap().contains("Claude needs your permission"));
+        assert_eq!(v["messages"][0]["content"], "hi");
     }
 
     // BrainRequestCarriesRoster contract
     #[test]
     fn brc1_anthropic_system_carries_roster_user_clean() {
-        let v = build_request(
-            Provider::Anthropic,
-            "hi",
-            &[agent("builder", "working", "", "")],
-            &[],
-        );
+        let v = build_request(Provider::Anthropic, "hi", &[agent("builder", "working", "", "")], &[], &[]);
         let sys = v["system"].as_str().unwrap();
         assert!(sys.contains("builder"));
         assert!(sys.contains("working"));
@@ -574,12 +670,7 @@ mod tests {
 
     #[test]
     fn brc2_gemini_system_carries_roster_user_clean() {
-        let v = build_request(
-            Provider::Gemini,
-            "hi",
-            &[agent("builder", "working", "", "")],
-            &[],
-        );
+        let v = build_request(Provider::Gemini, "hi", &[agent("builder", "working", "", "")], &[], &[]);
         let sys = v["system_instruction"]["parts"][0]["text"].as_str().unwrap();
         assert!(sys.contains("builder"));
         assert_eq!(v["contents"][0]["parts"][0]["text"], "hi");
@@ -587,12 +678,7 @@ mod tests {
 
     #[test]
     fn brc3_openai_system_carries_roster_user_clean() {
-        let v = build_request(
-            Provider::OpenAi,
-            "hi",
-            &[agent("builder", "working", "", "")],
-            &[],
-        );
+        let v = build_request(Provider::OpenAi, "hi", &[agent("builder", "working", "", "")], &[], &[]);
         assert_eq!(v["messages"][0]["role"], "system");
         let sys = v["messages"][0]["content"].as_str().unwrap();
         assert!(sys.contains("builder"));
@@ -601,7 +687,7 @@ mod tests {
 
     #[test]
     fn brc4_empty_roster_says_no_observation() {
-        let v = build_request(Provider::Anthropic, "hi", &[], &[]);
+        let v = build_request(Provider::Anthropic, "hi", &[], &[], &[]);
         assert!(v["system"].as_str().unwrap().contains("沒有觀測到"));
     }
 
@@ -739,7 +825,7 @@ mod tests {
     #[test]
     fn rch1_anthropic_prepends_history() {
         let history = vec![pair("早安", "你好")];
-        let v = build_request(Provider::Anthropic, "誰在工作", &[], &history);
+        let v = build_request(Provider::Anthropic, "誰在工作", &[], &[], &history);
         let m = v["messages"].as_array().unwrap();
         assert_eq!(m.len(), 3);
         assert_eq!(m[0], json!({ "role": "user", "content": "早安" }));
@@ -751,7 +837,7 @@ mod tests {
     #[test]
     fn rch2_openai_roles_and_tail() {
         let history = vec![pair("早安", "你好")];
-        let v = build_request(Provider::OpenAi, "誰在工作", &[], &history);
+        let v = build_request(Provider::OpenAi, "誰在工作", &[], &[], &history);
         let m = v["messages"].as_array().unwrap();
         let roles: Vec<&str> = m.iter().map(|x| x["role"].as_str().unwrap()).collect();
         assert_eq!(roles, ["system", "user", "assistant", "user"]);
@@ -761,7 +847,7 @@ mod tests {
     #[test]
     fn rch3_gemini_roles_and_texts() {
         let history = vec![pair("早安", "你好")];
-        let v = build_request(Provider::Gemini, "誰在工作", &[], &history);
+        let v = build_request(Provider::Gemini, "誰在工作", &[], &[], &history);
         let c = v["contents"].as_array().unwrap();
         let roles: Vec<&str> = c.iter().map(|x| x["role"].as_str().unwrap()).collect();
         assert_eq!(roles, ["user", "model", "user"]);
@@ -773,11 +859,11 @@ mod tests {
     #[test]
     fn rch4_empty_history_matches_single_turn() {
         // Anthropic/OpenAI single-turn shape unchanged; Gemini gains role:user.
-        let a = build_request(Provider::Anthropic, "hi", &[], &[]);
+        let a = build_request(Provider::Anthropic, "hi", &[], &[], &[]);
         assert_eq!(a["messages"].as_array().unwrap().len(), 1);
         assert_eq!(a["messages"][0], json!({ "role": "user", "content": "hi" }));
 
-        let o = build_request(Provider::OpenAi, "hi", &[], &[]);
+        let o = build_request(Provider::OpenAi, "hi", &[], &[], &[]);
         let oroles: Vec<&str> = o["messages"]
             .as_array()
             .unwrap()
@@ -786,7 +872,7 @@ mod tests {
             .collect();
         assert_eq!(oroles, ["system", "user"]);
 
-        let g = build_request(Provider::Gemini, "hi", &[], &[]);
+        let g = build_request(Provider::Gemini, "hi", &[], &[], &[]);
         assert_eq!(g["contents"].as_array().unwrap().len(), 1);
         assert_eq!(g["contents"][0]["role"], "user");
         assert_eq!(g["contents"][0]["parts"][0]["text"], "hi");
@@ -796,12 +882,7 @@ mod tests {
     #[test]
     fn rfh1_roster_in_system_history_user_verbatim() {
         let history = vec![pair("hi", "hello")];
-        let v = build_request(
-            Provider::Anthropic,
-            "誰在工作",
-            &[agent("builder", "working", "", "")],
-            &history,
-        );
+        let v = build_request(Provider::Anthropic, "誰在工作", &[agent("builder", "working", "", "")], &[], &history);
         assert!(v["system"].as_str().unwrap().contains("builder"));
         let m = v["messages"].as_array().unwrap();
         assert_eq!(m.len(), 3);
@@ -814,20 +895,10 @@ mod tests {
     #[test]
     fn rfh2_roster_fully_from_current_param() {
         let history = vec![pair("hi", "hello")];
-        let v1 = build_request(
-            Provider::Anthropic,
-            "誰在工作",
-            &[agent("builder", "working", "", "")],
-            &history,
-        );
+        let v1 = build_request(Provider::Anthropic, "誰在工作", &[agent("builder", "working", "", "")], &[], &history);
         assert!(v1["system"].as_str().unwrap().contains("builder"));
 
-        let v2 = build_request(
-            Provider::Anthropic,
-            "誰在工作",
-            &[agent("reviewer", "idle", "", "")],
-            &history,
-        );
+        let v2 = build_request(Provider::Anthropic, "誰在工作", &[agent("reviewer", "idle", "", "")], &[], &history);
         let sys2 = v2["system"].as_str().unwrap();
         assert!(sys2.contains("reviewer"));
         assert!(!sys2.contains("builder"));
@@ -837,7 +908,7 @@ mod tests {
     // SummonPromptInstruction
     #[test]
     fn spi1_prompt_carries_summon_json_literals() {
-        let out = system_prompt(&[]);
+        let out = system_prompt(&[], &[]);
         assert!(out.contains(r#""action":"summon""#));
         assert!(out.contains(r#""project""#));
         assert!(out.contains(r#""task""#));
@@ -845,7 +916,7 @@ mod tests {
 
     #[test]
     fn spi2_summon_instruction_is_additive() {
-        let out = system_prompt(&[]);
+        let out = system_prompt(&[], &[]);
         assert!(out.contains(SYSTEM_PROMPT));
         assert!(out.contains("沒有觀測到"));
         assert!(out.contains("語音辨識"));
