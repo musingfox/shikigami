@@ -44,6 +44,45 @@ pub fn parse_line(line: &str) -> Option<Activity> {
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookDepth {
+    pub pane: String,
+    pub label: String,
+    pub detail: String,
+    pub ts: String,
+}
+
+pub fn parse_depth(line: &str) -> Option<HookDepth> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    let kind = v.get("kind")?.as_str()?;
+    let pane = v.get("pane")?.as_str()?;
+    let payload = v.get("payload")?;
+    let (label, detail) = match kind {
+        "notification" => (
+            payload.get("notification_type")?.as_str()?,
+            payload.get("message")?.as_str()?,
+        ),
+        "stop" => (
+            "stop",
+            payload
+                .get("last_assistant_message")
+                .or_else(|| payload.get("lastAssistantMessage"))?
+                .as_str()?,
+        ),
+        _ => return None,
+    };
+    Some(HookDepth {
+        pane: pane.into(),
+        label: label.into(),
+        detail: detail.into(),
+        ts: v
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into(),
+    })
+}
+
 pub fn spawn_watcher(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let path = spool_path();
@@ -124,4 +163,64 @@ mod tests {
         assert_eq!(parse_line(r#"{"pane":"x"}"#), None); // no kind
         assert_eq!(parse_line(r#"{"kind":42}"#), None); // kind not a string
     }
+
+    #[test]
+    fn depth_parses_permission_notification() {
+        let line = r#"{"kind":"notification","pane":"wT:p1","ts":"T","payload":{"session_id":"s","message":"Claude needs your permission","notification_type":"permission_prompt"}}"#;
+        assert_eq!(
+            parse_depth(line),
+            Some(HookDepth {
+                pane: "wT:p1".into(),
+                label: "permission_prompt".into(),
+                detail: "Claude needs your permission".into(),
+                ts: "T".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn depth_parses_stop_message() {
+        let line = r#"{"kind":"stop","pane":"wT:p1","ts":"T","payload":{"last_assistant_message":"改完了，要我跑測試嗎？"}}"#;
+        assert_eq!(
+            parse_depth(line),
+            Some(HookDepth {
+                pane: "wT:p1".into(),
+                label: "stop".into(),
+                detail: "改完了，要我跑測試嗎？".into(),
+                ts: "T".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn depth_accepts_camel_case_stop_message() {
+        let line = r#"{"kind":"stop","pane":"wT:p1","ts":"T","payload":{"sessionId":"s","lastAssistantMessage":"done"}}"#;
+        assert_eq!(parse_depth(line).unwrap().detail, "done");
+    }
+
+    #[test]
+    fn identity_only_line_has_no_depth_and_keeps_activity() {
+        assert_eq!(parse_depth(LIVE_LIKE), None);
+        assert_eq!(
+            parse_line(LIVE_LIKE),
+            Some(Activity {
+                source: "cchooks",
+                session: "abc-123".into(),
+                pane: "wT:p1".into(),
+                kind: "stop".into(),
+                ts: "2026-07-23T10:00:00Z".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn depth_rejects_invalid_or_unattributed_lines() {
+        assert_eq!(parse_depth("not json"), None);
+        assert_eq!(parse_depth(""), None);
+        assert_eq!(
+            parse_depth(r#"{"kind":"stop","payload":{"last_assistant_message":"x"}}"#),
+            None
+        );
+    }
+
 }
