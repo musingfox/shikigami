@@ -270,7 +270,7 @@ fn render_roster(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
 /// model can name real working agents without the user transcript being touched.
 pub(crate) fn system_prompt(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
     format!(
-        "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。被問到 agent「卡在什麼」時，優先依精確訊號回答；只有畫面節錄時，回答中必須明說「從畫面看到」；沒有精確訊號或畫面節錄時，回答中必須明說「不知道」，不得用狀態詞推斷卡住原因。使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
+        "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。被問到某個 agent「卡在什麼」「在忙什麼」時，先在名冊裡看那個 agent 底下有沒有「精確訊號」和「畫面節錄」這兩行，再從下面三條擇一，只套用選中的那一條：\n(1) 有「精確訊號」那一行：用一句口語轉述精確訊號說的那件事，保留它原本的關鍵詞（英文關鍵詞照原樣留著），不要改寫成同義詞，也不要把標籤名或「精確訊號」四個字唸出來。\n(2) 沒有精確訊號、有「畫面節錄」那一行：依畫面節錄的內容回答，並逐字說出「從畫面看到」。\n(3) 兩行都沒有：這時你手上只有狀態詞，回答必須以「不知道」這三個字開頭，例如「不知道它卡在什麼，只知道它現在是 blocked」；不得給任何原因，不得出現「畫面」或「看到」——名冊表頭寫的「herdr 從終端機畫面推測」只是狀態詞的來歷，不是畫面節錄，不能拿來回答。\n使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
         SYSTEM_PROMPT,
         render_roster(roster, depth),
         SUMMON_INSTRUCTION
@@ -1001,6 +1001,16 @@ mod tests {
         assert!(out.contains("沒有觀測到"));
         assert!(out.contains("語音辨識"));
         assert!(out.contains(r#""action":"summon""#));
+    }
+
+    // The no-depth branch is the one the brain used to invent a source for, so
+    // its rule is pinned literally: say 不知道, name no cause, claim no screen.
+    #[test]
+    fn dai_t3_no_depth_branch_forbids_inventing_a_source() {
+        let out = system_prompt(&[], &[]);
+        assert!(out.contains("兩行都沒有"));
+        assert!(out.contains("「不知道」這三個字開頭"));
+        assert!(out.contains("不得給任何原因"));
     }
 
     #[test]
