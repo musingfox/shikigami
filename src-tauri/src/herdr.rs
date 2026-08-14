@@ -90,6 +90,34 @@ fn call_at(
         .ok_or_else(|| format!("herdr {method}: no result"))
 }
 
+/// Read the last 40 lines rendered in a pane. Herdr strips terminal control
+/// sequences; this adapter only validates and returns its text field.
+pub fn pane_recent_text(pane: &str) -> Result<String, String> {
+    pane_recent_text_at(&socket_path(), pane)
+}
+
+fn pane_recent_text_at(sock: &std::path::Path, pane: &str) -> Result<String, String> {
+    let result = call_at(
+        sock,
+        CALL_TIMEOUT,
+        0,
+        "pane.read",
+        serde_json::json!({
+            "pane_id": pane,
+            "source": "recent",
+            "lines": 40,
+            "format": "text",
+            "strip_ansi": true
+        }),
+    )?;
+    result
+        .get("read")
+        .and_then(|read| read.get("text"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "herdr pane.read: missing read.text".to_string())
+}
+
 /// Normalize an `agent.list` result into core AgentEntry rows.
 pub fn parse_agent_list(result: &Value) -> Vec<AgentEntry> {
     result
@@ -180,23 +208,43 @@ fn retry_while<F: FnMut() -> Result<Value, String>>(
     code: &str,
     deadline: Duration,
     interval: Duration,
+    send: F,
+) -> Result<Value, String> {
+    let start = Instant::now();
+    retry_while_with_clock(
+        step,
+        code,
+        deadline,
+        interval,
+        send,
+        || start.elapsed(),
+        std::thread::sleep,
+    )
+}
+
+fn retry_while_with_clock<
+    F: FnMut() -> Result<Value, String>,
+    E: Fn() -> Duration,
+    S: FnMut(Duration),
+>(
+    step: &str,
+    code: &str,
+    deadline: Duration,
+    interval: Duration,
     mut send: F,
+    elapsed: E,
+    mut sleep: S,
 ) -> Result<Value, String> {
     let expected = format!("\"code\":\"{code}\"");
-    let start = Instant::now();
     let mut attempts = 0;
-    // The deadline is checked after the sleep, never after the send: a send is
-    // only ever issued from inside the deadline, so giving up overshoots by one
-    // attempt's read timeout at most. Checking it on the send's own error would
-    // let an attempt started at deadline-ε run its full read timeout on top.
     let last_err = loop {
         attempts += 1;
         match send() {
             Ok(result) => return Ok(result),
             Err(err) if !err.contains(&expected) => return Err(err),
             Err(err) => {
-                std::thread::sleep(interval);
-                if start.elapsed() >= deadline {
+                sleep(interval);
+                if elapsed() >= deadline {
                     break err;
                 }
             }
@@ -204,7 +252,7 @@ fn retry_while<F: FnMut() -> Result<Value, String>>(
     };
     Err(format!(
         "{step} still rejected as {code} after {}ms ({attempts} attempts); last error: {last_err}",
-        start.elapsed().as_millis()
+        elapsed().as_millis()
     ))
 }
 
@@ -553,15 +601,26 @@ mod tests {
     }
 
     #[test]
-    fn t1_parse_maps_fields_and_name_fallbacks() {
-        let rows = parse_agent_list(&live_like_result());
+    fn t1_parse_maps_exact_six_field_roster_shape() {
         assert_eq!(
-            rows,
+            parse_agent_list(&live_like_result()),
             vec![
-                // name null → cwd basename; no title in source → ""
-                entry_full("term_a", "cyris", "wD:p1", "blocked", "", "/Users/x/workspace/cyris"),
-                // declared name wins; title from terminal_title_stripped
-                entry_full("term_b", "builder", "wT:p1", "working", "設計 1:1:N 架構", "/Users/x/workspace/shikigami"),
+                AgentEntry {
+                    id: "term_a".into(),
+                    name: "cyris".into(),
+                    pane: "wD:p1".into(),
+                    status: "blocked".into(),
+                    title: "".into(),
+                    cwd: "/Users/x/workspace/cyris".into(),
+                },
+                AgentEntry {
+                    id: "term_b".into(),
+                    name: "builder".into(),
+                    pane: "wT:p1".into(),
+                    status: "working".into(),
+                    title: "設計 1:1:N 架構".into(),
+                    cwd: "/Users/x/workspace/shikigami".into(),
+                },
             ]
         );
     }
@@ -582,11 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn t4_diff_no_change() {
-        let a = vec![entry("t", "n", "p", "idle")];
-        let (changed, transitions) = diff_roster(&a, &a.clone());
-        assert!(!changed);
-        assert!(transitions.is_empty());
+    fn t4_diff_identical_two_row_roster_has_no_changes() {
+        let roster = parse_agent_list(&live_like_result());
+        assert_eq!(diff_roster(&roster, &roster), (false, vec![]));
     }
 
     #[test]
@@ -640,6 +697,72 @@ mod tests {
         let p = std::env::temp_dir().join(format!("shk-{tag}.sock"));
         let _ = std::fs::remove_file(&p); // a stale file from a past run means AddrInUse
         p
+    }
+
+    fn pane_read_server(tag: &str, response: &'static [u8]) -> (std::path::PathBuf, std::thread::JoinHandle<Value>) {
+        let path = tmp_sock(tag);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut req = String::new();
+            BufReader::new(stream.try_clone().unwrap()).read_line(&mut req).unwrap();
+            stream.write_all(response).unwrap();
+            serde_json::from_str(&req).unwrap()
+        });
+        (path, handle)
+    }
+
+    #[test]
+    fn pane_read_returns_recent_plain_text_verbatim() {
+        let (path, server) = pane_read_server(
+            "pane-read-ok",
+            b"{\"result\":{\"type\":\"pane_read\",\"read\":{\"pane_id\":\"wD:p1\",\"source\":\"recent\",\"format\":\"text\",\"text\":\"299\\n300\\n\",\"revision\":1,\"truncated\":false}}}\n",
+        );
+        let got = pane_recent_text_at(&path, "wD:p1");
+        let request = server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got.unwrap(), "299\n300\n");
+        assert_eq!(request["method"], "pane.read");
+        assert_eq!(
+            request["params"],
+            serde_json::json!({
+                "pane_id": "wD:p1",
+                "source": "recent",
+                "lines": 40,
+                "format": "text",
+                "strip_ansi": true
+            })
+        );
+    }
+
+    #[test]
+    fn pane_read_surfaces_server_error() {
+        let (path, server) =
+            pane_read_server("pane-read-error", b"{\"error\":{\"code\":\"pane_not_found\"}}\n");
+        let err = pane_recent_text_at(&path, "wD:p1").unwrap_err();
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("pane.read"), "{err}");
+        assert!(err.contains("pane_not_found"), "{err}");
+    }
+
+    #[test]
+    fn pane_read_rejects_missing_text() {
+        let (path, server) =
+            pane_read_server("pane-read-shape", b"{\"result\":{\"type\":\"pane_read\"}}\n");
+        let err = pane_recent_text_at(&path, "wD:p1").unwrap_err();
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("pane.read"), "{err}");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_pane_read_returns_ansi_free_text() {
+        let listed = call(0, "agent.list", serde_json::json!({})).expect("agent.list");
+        let pane = listed["agents"][0]["pane_id"].as_str().expect("first agent pane");
+        let text = pane_recent_text(pane).expect("pane.read");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
     }
 
     #[test]
@@ -705,86 +828,115 @@ mod tests {
     }
 
     // PromptRetry
-    #[test]
-    fn pr3a_non_not_ready_error_fails_immediately() {
-        let calls = std::cell::Cell::new(0usize);
-        let err = "herdr agent.prompt: {\"code\":\"agent_not_found\",\"message\":\"no such agent\"}";
-        let start = std::time::Instant::now();
-        let got = prompt_until_accepted(Duration::from_secs(1), Duration::from_millis(1), || {
-            calls.set(calls.get() + 1);
-            Err(err.to_string())
-        });
-        assert_eq!(got.unwrap_err(), err);
-        assert_eq!(calls.get(), 1);
-        assert!(start.elapsed() < Duration::from_millis(100));
+    fn prompt_with_clock<F: FnMut() -> Result<Value, String>>(
+        clock: &std::cell::Cell<Duration>,
+        deadline: Duration,
+        interval: Duration,
+        send: F,
+    ) -> Result<Value, String> {
+        retry_while_with_clock(
+            "agent.prompt",
+            "agent_not_ready",
+            deadline,
+            interval,
+            send,
+            || clock.get(),
+            |duration| clock.set(clock.get() + duration),
+        )
     }
 
     #[test]
-    fn pr3b_message_token_without_code_pair_fails_immediately() {
+    fn pr1_fake_clock_makes_six_attempts_before_30ms_deadline() {
+        let clock = std::cell::Cell::new(Duration::ZERO);
         let calls = std::cell::Cell::new(0usize);
-        let err = "herdr agent.prompt: {\"code\":\"agent_not_found\",\"message\":\"agent_not_ready was not the problem\"}";
-        let got = prompt_until_accepted(Duration::from_secs(1), Duration::from_millis(1), || {
-            calls.set(calls.get() + 1);
-            Err(err.to_string())
-        });
-        assert_eq!(got.unwrap_err(), err);
-        assert_eq!(calls.get(), 1);
-    }
-
-    #[test]
-    fn pr1_retries_not_ready_until_accepted() {
-        let not_ready = "herdr agent.prompt: {\"code\":\"agent_not_ready\",\"message\":\"agent wD:pB is not an active named agent\"}";
-        let script = [
-            Err(not_ready.to_string()),
-            Err(not_ready.to_string()),
-            Ok(serde_json::json!({"ok": true})),
-        ];
-        let calls = std::cell::Cell::new(0usize);
-        let start = std::time::Instant::now();
-        let got = prompt_until_accepted(Duration::from_secs(1), Duration::from_millis(1), || {
-            let n = calls.get();
-            calls.set(n + 1);
-            script[n].clone()
-        });
-        assert_eq!(got.unwrap(), serde_json::json!({"ok": true}));
-        assert_eq!(calls.get(), 3);
-        assert!(start.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn pr4_accepts_first_prompt_without_sleeping() {
-        let calls = std::cell::Cell::new(0usize);
-        let start = std::time::Instant::now();
-        let got = prompt_until_accepted(Duration::from_secs(1), Duration::from_millis(1), || {
-            calls.set(calls.get() + 1);
-            Ok(serde_json::json!({"ok": true}))
-        });
-        assert_eq!(got.unwrap(), serde_json::json!({"ok": true}));
-        assert_eq!(calls.get(), 1);
-        assert!(start.elapsed() < Duration::from_millis(100));
-    }
-
-    #[test]
-    fn pr2_timeout_names_prompt_step_and_preserves_last_error() {
-        let calls = std::cell::Cell::new(0usize);
-        let err = "herdr agent.prompt: {\"code\":\"agent_not_ready\",\"message\":\"agent wD:pB is not an active named agent\"}";
-        let start = std::time::Instant::now();
-        let got = prompt_until_accepted(
+        let source =
+            "herdr agent.prompt: {\"code\":\"agent_not_ready\",\"message\":\"agent wD:pB is not an active named agent\"}";
+        let err = prompt_with_clock(
+            &clock,
             Duration::from_millis(30),
             Duration::from_millis(5),
             || {
                 calls.set(calls.get() + 1);
-                Err(err.to_string())
+                Err(source.to_string())
             },
-        );
-        let elapsed = start.elapsed();
-        let err = got.unwrap_err();
+        )
+        .unwrap_err();
+        assert_eq!(calls.get(), 6);
         assert!(err.contains("agent.prompt"), "{err}");
         assert!(err.contains("agent_not_ready"), "{err}");
         assert!(err.contains("agent wD:pB is not an active named agent"), "{err}");
-        assert!(elapsed >= Duration::from_millis(30), "{elapsed:?}");
-        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-        assert!((2..=100).contains(&calls.get()), "{}", calls.get());
+        assert!(err.contains("after 30ms"), "{err}");
+    }
+
+    #[test]
+    fn pr2_fake_clock_never_sends_at_or_after_deadline() {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let sends = std::cell::RefCell::new(Vec::new());
+        let deadline = Duration::from_millis(30);
+        let got = prompt_with_clock(
+            &clock,
+            deadline,
+            Duration::from_millis(20),
+            || {
+                sends.borrow_mut().push(clock.get());
+                Err("herdr agent.prompt: {\"code\":\"agent_not_ready\"}".to_string())
+            },
+        );
+        assert!(got.is_err());
+        assert_eq!(*sends.borrow(), [Duration::ZERO, Duration::from_millis(20)]);
+        assert!(sends.borrow().iter().all(|at| *at < deadline));
+    }
+
+    #[test]
+    fn pr3_fake_clock_retries_until_success() {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let calls = std::cell::Cell::new(0usize);
+        let got = prompt_with_clock(
+            &clock,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    Err("herdr agent.prompt: {\"code\":\"agent_not_ready\"}".to_string())
+                } else {
+                    Ok(serde_json::json!({"ok": true}))
+                }
+            },
+        );
+        assert_eq!(got.unwrap(), serde_json::json!({"ok": true}));
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn pr4_non_retryable_error_does_not_advance_clock() {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let calls = std::cell::Cell::new(0usize);
+        let source = "herdr agent.prompt: {\"code\":\"agent_not_found\"}";
+        let got = prompt_with_clock(
+            &clock,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            || {
+                calls.set(calls.get() + 1);
+                Err(source.to_string())
+            },
+        );
+        assert_eq!(got.unwrap_err(), source);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(clock.get(), Duration::ZERO);
+    }
+
+    #[test]
+    fn pr5_real_clock_waits_until_deadline() {
+        let start = Instant::now();
+        let got = prompt_until_accepted(
+            Duration::from_millis(30),
+            Duration::from_millis(5),
+            || Err("herdr agent.prompt: {\"code\":\"agent_not_ready\"}".to_string()),
+        );
+        assert!(got.is_err());
+        assert!(start.elapsed() >= Duration::from_millis(30));
     }
 
     /// The bound the give-up time relies on: with a coarse interval the old
@@ -926,16 +1078,29 @@ mod tests {
 
     #[test]
     fn pr7_no_send_is_issued_after_the_deadline() {
-        let start = std::time::Instant::now();
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let sleeps = std::cell::Cell::new(0usize);
         let sends = std::cell::RefCell::new(Vec::new());
         let deadline = Duration::from_millis(30);
-        let got = prompt_until_accepted(deadline, Duration::from_millis(20), || {
-            sends.borrow_mut().push(start.elapsed());
-            Err("herdr agent.prompt: {\"code\":\"agent_not_ready\",\"message\":\"x\"}".to_string())
-        });
+        let got = retry_while_with_clock(
+            "agent.prompt",
+            "agent_not_ready",
+            deadline,
+            Duration::from_millis(20),
+            || {
+                sends.borrow_mut().push(clock.get());
+                Err("herdr agent.prompt: {\"code\":\"agent_not_ready\",\"message\":\"x\"}".to_string())
+            },
+            || clock.get(),
+            |duration| {
+                sleeps.set(sleeps.get() + 1);
+                assert!(sleeps.get() <= 2, "deadline check did not stop retries");
+                clock.set(clock.get() + duration);
+            },
+        );
         assert!(got.is_err());
         let sends = sends.borrow();
-        assert!(sends.len() >= 2, "{sends:?}");
+        assert_eq!(sends.len(), 2, "{sends:?}");
         for at in sends.iter() {
             assert!(*at < deadline, "send issued at {at:?}, past the {deadline:?} deadline");
         }

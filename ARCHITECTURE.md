@@ -39,6 +39,8 @@ Write one Rust module with a `spawn_watcher(app)` (or socket handler) that
 normalizes the source's activity into `agent:speech` / `agent:report` emits,
 register it in `lib.rs::run`. Nothing else changes.
 
+Depth normalization stays in the Rust brain only; the source wire shape remains in adapters.
+
 ## Known simplifications (ponytail ledger)
 
 - Tray's mute/recent go straight to the sumvox adapter; a port trait in front

@@ -8,10 +8,14 @@
 
 use crate::events::{Activity, AGENT_ACTIVITY};
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::Emitter;
+
+static HOOK_DEPTHS: Mutex<VecDeque<HookDepth>> = Mutex::new(VecDeque::new());
 
 pub fn spool_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -42,6 +46,78 @@ pub fn parse_line(line: &str) -> Option<Activity> {
         kind,
         ts: s("ts"),
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookDepth {
+    pub pane: String,
+    pub label: String,
+    pub detail: String,
+    pub ts: String,
+}
+
+pub fn parse_depth(line: &str) -> Option<HookDepth> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    let kind = v.get("kind")?.as_str()?;
+    let pane = v.get("pane")?.as_str()?;
+    let payload = v.get("payload")?;
+    let (label, detail) = match kind {
+        "notification" => (
+            payload.get("notification_type")?.as_str()?,
+            payload.get("message")?.as_str()?,
+        ),
+        "stop" => (
+            "stop",
+            payload
+                .get("last_assistant_message")
+                .or_else(|| payload.get("lastAssistantMessage"))?
+                .as_str()?,
+        ),
+        _ => return None,
+    };
+    Some(HookDepth {
+        pane: pane.into(),
+        label: label.into(),
+        detail: detail.into(),
+        ts: v
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .into(),
+    })
+}
+
+pub fn record_depth(line: &str) -> Option<HookDepth> {
+    let mut depth = parse_depth(line)?;
+    if depth.detail.chars().count() > 2000 {
+        depth.detail = depth.detail.chars().rev().take(2000).collect::<String>().chars().rev().collect();
+    }
+    let mut depths = HOOK_DEPTHS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(index) = depths.iter().position(|entry| entry.pane == depth.pane) {
+        depths.remove(index);
+    }
+    depths.push_back(depth.clone());
+    if depths.len() > 64 {
+        depths.pop_front();
+    }
+    Some(depth)
+}
+
+pub fn depth_for(pane: &str) -> Option<HookDepth> {
+    HOOK_DEPTHS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|depth| depth.pane == pane)
+        .cloned()
+}
+
+#[cfg(test)]
+fn clear_depths() {
+    HOOK_DEPTHS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 pub fn spawn_watcher(app: tauri::AppHandle) {
@@ -78,6 +154,7 @@ pub fn spawn_watcher(app: tauri::AppHandle) {
             pending.push_str(&buf);
             while let Some(nl) = pending.find('\n') {
                 let line: String = pending.drain(..=nl).collect();
+                let _ = record_depth(line.trim());
                 if let Some(act) = parse_line(line.trim()) {
                     let _ = app.emit(AGENT_ACTIVITY, act);
                 }
@@ -89,6 +166,7 @@ pub fn spawn_watcher(app: tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     // exact shape scripts/cc-hook.sh produces
     const LIVE_LIKE: &str = r#"{"kind":"stop","pane":"wT:p1","ts":"2026-07-23T10:00:00Z","payload":{"session_id":"abc-123","transcript_path":"/x/y.jsonl","cwd":"/Users/x/proj"}}"#;
@@ -124,4 +202,120 @@ mod tests {
         assert_eq!(parse_line(r#"{"pane":"x"}"#), None); // no kind
         assert_eq!(parse_line(r#"{"kind":42}"#), None); // kind not a string
     }
+
+    #[test]
+    fn depth_parses_permission_notification() {
+        let line = r#"{"kind":"notification","pane":"wT:p1","ts":"T","payload":{"session_id":"s","message":"Claude needs your permission","notification_type":"permission_prompt"}}"#;
+        assert_eq!(
+            parse_depth(line),
+            Some(HookDepth {
+                pane: "wT:p1".into(),
+                label: "permission_prompt".into(),
+                detail: "Claude needs your permission".into(),
+                ts: "T".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn depth_parses_stop_message() {
+        let line = r#"{"kind":"stop","pane":"wT:p1","ts":"T","payload":{"last_assistant_message":"改完了，要我跑測試嗎？"}}"#;
+        assert_eq!(
+            parse_depth(line),
+            Some(HookDepth {
+                pane: "wT:p1".into(),
+                label: "stop".into(),
+                detail: "改完了，要我跑測試嗎？".into(),
+                ts: "T".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn depth_accepts_camel_case_stop_message() {
+        let line = r#"{"kind":"stop","pane":"wT:p1","ts":"T","payload":{"sessionId":"s","lastAssistantMessage":"done"}}"#;
+        assert_eq!(parse_depth(line).unwrap().detail, "done");
+    }
+
+    #[test]
+    fn identity_only_line_has_no_depth_and_keeps_activity() {
+        assert_eq!(parse_depth(LIVE_LIKE), None);
+        assert_eq!(
+            parse_line(LIVE_LIKE),
+            Some(Activity {
+                source: "cchooks",
+                session: "abc-123".into(),
+                pane: "wT:p1".into(),
+                kind: "stop".into(),
+                ts: "2026-07-23T10:00:00Z".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn depth_rejects_invalid_or_unattributed_lines() {
+        assert_eq!(parse_depth("not json"), None);
+        assert_eq!(parse_depth(""), None);
+        assert_eq!(
+            parse_depth(r#"{"kind":"stop","payload":{"last_assistant_message":"x"}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn depth_lookup_latest_record_wins() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_depths();
+        record_depth(r#"{"kind":"notification","pane":"p1","payload":{"notification_type":"permission_prompt","message":"wait"}}"#);
+        record_depth(r#"{"kind":"stop","pane":"p1","payload":{"last_assistant_message":"done"}}"#);
+        assert_eq!(depth_for("p1").unwrap().label, "stop");
+        assert_eq!(depth_for("p1").unwrap().detail, "done");
+    }
+
+    #[test]
+    fn depth_lookup_unseen_pane_is_none() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_depths();
+        assert_eq!(depth_for("unseen"), None);
+    }
+
+    #[test]
+    fn depth_lookup_evicts_oldest_after_64_panes() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_depths();
+        for n in 1..=65 {
+            let line = format!(r#"{{"kind":"stop","pane":"p{n}","payload":{{"last_assistant_message":"x"}}}}"#);
+            record_depth(&line);
+        }
+        assert_eq!(depth_for("p1"), None);
+        assert!(depth_for("p2").is_some());
+        assert!(depth_for("p65").is_some());
+    }
+
+    #[test]
+    fn depth_lookup_truncates_detail_to_final_2000_chars() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_depths();
+        let detail = "a".repeat(9_999) + "終";
+        let line = serde_json::json!({
+            "kind": "stop",
+            "pane": "p1",
+            "payload": {"last_assistant_message": detail}
+        })
+        .to_string();
+        let stored = record_depth(&line).unwrap();
+        assert_eq!(stored.detail.chars().count(), 2000);
+        assert!(stored.detail.ends_with("終"));
+        assert_eq!(depth_for("p1").unwrap().detail, stored.detail);
+    }
+
+    #[test]
+    fn malformed_depth_preserves_prior_content() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_depths();
+        record_depth(r#"{"kind":"stop","pane":"p1","payload":{"last_assistant_message":"prior"}}"#);
+        assert_eq!(record_depth("not json"), None);
+        assert_eq!(depth_for("p1").unwrap().detail, "prior");
+    }
+
 }
