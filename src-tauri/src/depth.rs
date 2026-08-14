@@ -84,6 +84,39 @@ mod tests {
         assert!(detail.starts_with('…'));
     }
 
+    // Contract line budgets: precise 6 lines / 200 chars, screen 12 / 600.
+    #[test]
+    fn precise_and_screen_keep_their_own_line_budgets() {
+        let long: String = (0..30).map(|i| format!("L{i}\n")).collect();
+        let screen_text = long.clone();
+        let got = collect_with(
+            &[agent("p1", "blocked")],
+            |pane| Some(hook(pane, &long)),
+            |_| Ok(screen_text.clone()),
+        );
+        let precise = got[0].precise.as_ref().unwrap();
+        assert_eq!(precise.detail.lines().count(), 6);
+        assert!(precise.detail.ends_with("L29"));
+        let screen = got[0].screen.as_ref().unwrap();
+        assert_eq!(screen.lines().count(), 12);
+        assert!(screen.ends_with("L29"));
+    }
+
+    // Budget exhaustion must not smuggle an all-empty agent into the output —
+    // render_roster would print a bare row for it.
+    #[test]
+    fn budget_stop_still_drops_depthless_agents() {
+        let mut roster = vec![agent("p0", "idle")];
+        roster.extend((1..12).map(|i| agent(&format!("p{i}"), "working")));
+        let got = collect_with(
+            &roster,
+            |pane| (pane != "p0").then(|| hook(pane, &"x".repeat(200))),
+            |_| Ok("screen".into()),
+        );
+        assert!(got.iter().all(|depth| depth.pane != "p0"));
+        assert_eq!(got.len(), 10);
+    }
+
     #[test]
     fn selects_blocked_without_precise_depth() {
         let roster = vec![agent("p1", "blocked")];
@@ -267,6 +300,7 @@ where
 {
     let mut depths = Vec::with_capacity(roster.len());
     let mut running = 0;
+    let mut budget_spent = false;
     for agent in roster {
         let precise = precise_for(&agent.pane).map(|depth| PreciseDepth {
             label: normalize_precise(&depth.label),
@@ -275,7 +309,10 @@ where
         if let Some(depth) = &precise {
             let chars = depth.detail.chars().count();
             if running + chars > 2000 {
-                return depths;
+                // Stop collecting, but fall through to the retain below —
+                // returning here leaked agents carrying no depth at all.
+                budget_spent = true;
+                break;
             }
             running += chars;
         }
@@ -286,12 +323,16 @@ where
         });
     }
 
-    let selected = select_panes(roster, |pane| {
-        depths.iter().any(|depth| depth.pane == pane && depth.precise.is_some())
-    });
+    let selected = if budget_spent {
+        Vec::new()
+    } else {
+        select_panes(roster, |pane| {
+            depths.iter().any(|depth| depth.pane == pane && depth.precise.is_some())
+        })
+    };
     for pane in selected {
         if let Ok(text) = screen_for(&pane) {
-            let screen = normalize(&text, 20, 600);
+            let screen = normalize(&text, 12, 600);
             let chars = screen.chars().count();
             if running + chars > 2000 {
                 break;
@@ -313,7 +354,7 @@ pub(crate) fn collect(roster: &[AgentEntry]) -> Vec<AgentDepth> {
 }
 
 fn normalize_precise(input: &str) -> String {
-    let normalized = normalize(input, usize::MAX, 200);
+    let normalized = normalize(input, 6, 200);
     if normalized.chars().count() > 200 {
         let tail: String = normalized.chars().skip(normalized.chars().count() - 199).collect();
         format!("…{tail}")
