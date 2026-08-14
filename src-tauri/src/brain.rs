@@ -256,7 +256,7 @@ fn render_roster(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
 /// model can name real working agents without the user transcript being touched.
 fn system_prompt(roster: &[AgentEntry], depth: &[AgentDepth]) -> String {
     format!(
-        "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
+        "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。被問到 agent「卡在什麼」時，優先依精確訊號回答；只有畫面節錄時，回答中必須明說「從畫面看到」；沒有精確訊號或畫面節錄時，回答中必須明說「不知道」，不得用狀態詞推斷卡住原因。使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
         SYSTEM_PROMPT,
         render_roster(roster, depth),
         SUMMON_INSTRUCTION
@@ -942,6 +942,65 @@ mod tests {
         assert!(out.contains(SYSTEM_PROMPT));
         assert!(out.contains("沒有觀測到"));
         assert!(out.contains("語音辨識"));
+    }
+
+    // DepthAnswerInstruction contract
+    #[test]
+    fn dai_t1_prompt_prioritizes_sources_and_forbids_guessing() {
+        let out = system_prompt(&[], &[]);
+        assert!(out.contains("精確訊號"));
+        assert!(out.contains("畫面節錄"));
+        assert!(out.contains("不要臆測"));
+    }
+
+    #[test]
+    fn dai_t2_instruction_preserves_existing_prompt_contracts() {
+        let out = system_prompt(&[], &[]);
+        assert!(out.contains(SYSTEM_PROMPT));
+        assert!(out.contains("沒有觀測到"));
+        assert!(out.contains("語音辨識"));
+        assert!(out.contains(r#""action":"summon""#));
+    }
+
+    #[test]
+    #[ignore]
+    fn dai_live_answers_follow_available_depth_provenance() {
+        let roster = [agent("builder", "blocked", "", "")];
+        let precise = [AgentDepth {
+            pane: "%1".into(),
+            precise: Some(PreciseDepth {
+                label: "permission_prompt".into(),
+                detail: "Claude needs your permission".into(),
+            }),
+            screen: None,
+        }];
+        let screen = [AgentDepth {
+            pane: "%1".into(),
+            precise: None,
+            screen: Some("cargo test\nerror[E0308]".into()),
+        }];
+        let ask_with = |depth: &[AgentDepth]| {
+            tauri::async_runtime::block_on(ask_once("builder 卡在什麼？", &roster, depth, &[]))
+                .unwrap()
+        };
+
+        let precise_reply = ask_with(&precise);
+        println!("precise reply: {precise_reply}");
+        assert!(
+            precise_reply.contains("權限") || precise_reply.to_lowercase().contains("permission")
+        );
+
+        let screen_reply = ask_with(&screen);
+        println!("screen reply: {screen_reply}");
+        assert!(screen_reply.contains("畫面"));
+
+        let unknown_reply = ask_with(&[]);
+        println!("no-depth reply: {unknown_reply}");
+        assert!(
+            unknown_reply.contains("不知道")
+                || unknown_reply.contains("未觀測")
+                || unknown_reply.contains("無法判斷")
+        );
     }
 
     // SummonActionParse
