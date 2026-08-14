@@ -237,6 +237,10 @@ fn retry_while_with_clock<
 ) -> Result<Value, String> {
     let expected = format!("\"code\":\"{code}\"");
     let mut attempts = 0;
+    // The deadline is checked after the sleep, never after the send: a send is
+    // only ever issued from inside the deadline, so giving up overshoots by one
+    // attempt's read timeout at most. Checking it on the send's own error would
+    // let an attempt started at deadline-ε run its full read timeout on top.
     let last_err = loop {
         attempts += 1;
         match send() {
