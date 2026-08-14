@@ -1,6 +1,70 @@
 #[cfg(test)]
 mod tests {
-    use super::normalize;
+    use super::{normalize, select_panes};
+    use crate::events::AgentEntry;
+
+    fn agent(pane: &str, status: &str) -> AgentEntry {
+        AgentEntry {
+            id: pane.to_string(),
+            name: pane.to_string(),
+            pane: pane.to_string(),
+            status: status.to_string(),
+            title: String::new(),
+            cwd: String::new(),
+        }
+    }
+
+    fn precise<'a>(panes: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
+        move |pane| panes.contains(&pane)
+    }
+
+    #[test]
+    fn selects_blocked_without_precise_depth() {
+        let roster = [agent("%1", "blocked")];
+        assert_eq!(select_panes(&roster, precise(&[])), vec!["%1"]);
+    }
+
+    #[test]
+    fn selects_working_without_precise_depth() {
+        let roster = [agent("%1", "working")];
+        assert_eq!(select_panes(&roster, precise(&[])), vec!["%1"]);
+    }
+
+    #[test]
+    fn selects_idle_with_precise_depth() {
+        let roster = [agent("%1", "idle")];
+        assert_eq!(select_panes(&roster, precise(&["%1"])), vec!["%1"]);
+    }
+
+    #[test]
+    fn excludes_idle_done_and_unknown_without_precise_depth() {
+        let roster = [
+            agent("%1", "idle"),
+            agent("%2", "done"),
+            agent("%3", "unknown"),
+        ];
+        assert!(select_panes(&roster, precise(&[])).is_empty());
+    }
+
+    #[test]
+    fn excludes_empty_pane() {
+        let roster = [agent("", "blocked")];
+        assert!(select_panes(&roster, precise(&[])).is_empty());
+    }
+
+    #[test]
+    fn preserves_order_and_caps_at_three() {
+        let roster = [
+            agent("p1", "blocked"),
+            agent("p2", "blocked"),
+            agent("p3", "working"),
+            agent("p4", "blocked"),
+        ];
+        assert_eq!(
+            select_panes(&roster, precise(&[])),
+            vec!["p1", "p2", "p3"]
+        );
+    }
 
     #[test]
     fn keeps_newest_lines() {
@@ -26,6 +90,23 @@ mod tests {
     fn unchanged_input_has_no_ellipsis() {
         assert_eq!(normalize("a\nb", 5, 100), "a\nb");
     }
+}
+
+use crate::events::AgentEntry;
+
+pub(crate) fn select_panes<F>(roster: &[AgentEntry], precise: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    roster
+        .iter()
+        .filter(|agent| {
+            !agent.pane.is_empty()
+                && (precise(&agent.pane) || matches!(agent.status.as_str(), "blocked" | "working"))
+        })
+        .take(3)
+        .map(|agent| agent.pane.clone())
+        .collect()
 }
 
 pub fn normalize(input: &str, max_lines: usize, max_chars: usize) -> String {
