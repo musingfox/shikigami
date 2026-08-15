@@ -296,15 +296,16 @@ fn strip_ansi_and_controls(input: &str) -> String {
         if ch == '\x1b' {
             if chars.peek() == Some(&'[') {
                 chars.next();
-                while let Some(next) = chars.next() {
+                // CSI runs until its final byte in @..~; drop the whole sequence.
+                for next in chars.by_ref() {
                     if ('@'..='~').contains(&next) {
                         break;
                     }
                 }
             }
-        } else if ch == '\n' || ch == '\r' {
-            output.push(ch);
-        } else if !ch.is_control() {
+        } else if ch == '\n' || ch == '\r' || !ch.is_control() {
+            // Newlines survive because normalize() works line-by-line; every
+            // other control character would render as garbage in the prompt.
             output.push(ch);
         }
     }

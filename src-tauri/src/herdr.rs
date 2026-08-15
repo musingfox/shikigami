@@ -31,6 +31,18 @@ pub fn get_roster() -> Vec<AgentEntry> {
     ROSTER.lock().map(|r| r.clone()).unwrap_or_default()
 }
 
+/// Ask herdr for the roster right now instead of reading the cache.
+///
+/// `get_roster` returns whatever `poll_once` last stored, so it is empty in any
+/// process that does not run the polling thread — a `cargo test` binary, for
+/// one. Live tests need the real thing, and they must not reach for `call`
+/// directly: the herdr wire shape stays inside this module (ARCHITECTURE.md
+/// rule 2), so this returns core `AgentEntry` values.
+#[cfg(test)]
+pub(crate) fn fetch_roster_now() -> Result<Vec<AgentEntry>, String> {
+    Ok(parse_agent_list(&call(1, "agent.list", serde_json::json!({}))?))
+}
+
 /// Drain the cached roster on a herdr disconnect and return its previous
 /// value. A dead socket means the last snapshot is stale, so we clear it and
 /// hand the caller the old contents — a non-empty return tells the caller an

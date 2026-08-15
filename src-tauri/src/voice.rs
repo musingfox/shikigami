@@ -177,7 +177,10 @@ mod tests {
     #[test]
     #[ignore]
     fn vdp_t2_live_depth_reaches_single_brain_request() {
-        let roster = crate::herdr::get_roster();
+        // NOT get_roster(): that reads the cache poll_once fills, and this test
+        // binary never runs the polling thread, so it would always be empty and
+        // this receipt would never be collectable.
+        let roster = crate::herdr::fetch_roster_now().expect("live herdr agent.list");
         let observed = roster
             .iter()
             .find(|agent| matches!(agent.status.as_str(), "blocked" | "working"))
