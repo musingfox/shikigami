@@ -87,6 +87,44 @@ fn log_inject_in(
     )
 }
 
+pub(crate) fn log_summon(
+    roster: &[AgentEntry],
+    pane: &str,
+    project: &str,
+    text: &str,
+) -> Result<(), String> {
+    log_summon_in(
+        &crate::config::config_dir(),
+        roster,
+        pane,
+        project,
+        text,
+        unix_secs(),
+    )
+}
+
+fn log_summon_in(
+    dir: &Path,
+    roster: &[AgentEntry],
+    pane: &str,
+    project: &str,
+    text: &str,
+    unix_secs: i64,
+) -> Result<(), String> {
+    append_row_in(
+        dir,
+        &action_row(
+            "summon",
+            pane,
+            text,
+            Some(project),
+            pane_name(roster, pane),
+            unix_secs,
+        ),
+        ROTATE_MAX_BYTES,
+    )
+}
+
 fn append_row_in(dir: &Path, row: &str, cap: u64) -> Result<(), String> {
     let _guard = APPEND_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let current = dir.join("memory.jsonl");
@@ -270,5 +308,29 @@ mod tests {
         );
         let tmp = Tmp::new();
         assert!(log_inject_in(&tmp.0.join("missing"), &[], "%1", "x", 0).is_err());
+    }
+
+    #[test]
+    fn successful_summon_writes_project_task_pane_and_known_agent() {
+        let empty = Tmp::new();
+        log_summon_in(&empty.0, &[], "%9", "cyris", "跑測試", 0).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(empty.0.join("memory.jsonl")).unwrap(),
+            "{\"ts\":\"1970-01-01T00:00:00Z\",\"verb\":\"summon\",\"pane\":\"%9\",\"text\":\"跑測試\",\"project\":\"cyris\"}\n"
+        );
+
+        let known = Tmp::new();
+        let roster = [crate::events::AgentEntry {
+            id: "2".into(),
+            name: "cyris-2".into(),
+            pane: "%9".into(),
+            status: "working".into(),
+            title: String::new(),
+            cwd: String::new(),
+        }];
+        log_summon_in(&known.0, &roster, "%9", "cyris", "跑測試", 0).unwrap();
+        let row = std::fs::read_to_string(known.0.join("memory.jsonl")).unwrap();
+        assert!(row.contains(r#""project":"cyris""#));
+        assert!(row.contains(r#""agent":"cyris-2""#));
     }
 }

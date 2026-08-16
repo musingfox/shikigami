@@ -128,9 +128,16 @@ async fn transcribe_utterance(pcm: Vec<u8>) -> Result<String, String> {
 // the new pane id, which the toast layer uses to point at the summoned agent.
 #[tauri::command]
 async fn summon_agent(project: String, task: String, cwd: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || herdr::summon(&project, &task, &cwd))
-        .await
-        .map_err(|e| format!("summon: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = herdr::summon(&project, &task, &cwd);
+        let Ok(pane) = &result else {
+            return result;
+        };
+        let logged = memory::log_summon(&herdr::get_roster(), pane, &project, &task);
+        memory::keep_action_result(result, logged)
+    })
+    .await
+    .map_err(|e| format!("summon: {e}"))?
 }
 
 #[tauri::command]
