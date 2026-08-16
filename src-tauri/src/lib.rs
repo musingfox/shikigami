@@ -133,6 +133,15 @@ async fn summon_agent(project: String, task: String, cwd: String) -> Result<Stri
         .map_err(|e| format!("summon: {e}"))?
 }
 
+#[tauri::command]
+fn prompt_agent(pane: String, text: String) -> Result<(), String> {
+    herdr::prompt_agent(pane.clone(), text.clone())?;
+    if let Err(error) = memory::log_inject(&herdr::get_roster(), &pane, &text) {
+        eprintln!("[memory] log inject: {error}");
+    }
+    Ok(())
+}
+
 /// Roster agent names for the STT vocab bias — spoken agent names should
 /// survive zh-pinned decoding (e.g. "investment-base").
 fn roster_names() -> Vec<String> {
@@ -197,7 +206,7 @@ fn resolve_project(root: &Path, name: &str) -> Option<PathBuf> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![read_file, process_utterance, transcribe_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, summon_agent, herdr::get_roster, herdr::focus_agent, herdr::prompt_agent])
+        .invoke_handler(tauri::generate_handler![read_file, process_utterance, transcribe_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, summon_agent, prompt_agent, herdr::get_roster, herdr::focus_agent])
         .setup(|app| {
             if let Err(error) = memory::ensure_dir(&config::config_dir()) {
                 eprintln!("[memory] create config dir: {error}");

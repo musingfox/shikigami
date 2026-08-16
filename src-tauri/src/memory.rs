@@ -52,6 +52,31 @@ fn pane_name<'a>(roster: &'a [AgentEntry], pane: &str) -> Option<&'a str> {
     roster.iter().find(|entry| entry.pane == pane).map(|entry| entry.name.as_str())
 }
 
+fn unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+pub(crate) fn log_inject(roster: &[AgentEntry], pane: &str, text: &str) -> Result<(), String> {
+    log_inject_in(&crate::config::config_dir(), roster, pane, text, unix_secs())
+}
+
+fn log_inject_in(
+    dir: &Path,
+    roster: &[AgentEntry],
+    pane: &str,
+    text: &str,
+    unix_secs: i64,
+) -> Result<(), String> {
+    append_row_in(
+        dir,
+        &action_row("inject", pane, text, None, pane_name(roster, pane), unix_secs),
+        ROTATE_MAX_BYTES,
+    )
+}
+
 fn append_row_in(dir: &Path, row: &str, cap: u64) -> Result<(), String> {
     let _guard = APPEND_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let current = dir.join("memory.jsonl");
@@ -193,5 +218,33 @@ mod tests {
         assert_eq!(pane_name(&roster, "%1"), Some("cyris"));
         assert_eq!(pane_name(&roster, "%9"), None);
         assert_eq!(pane_name(&[], "%1"), None);
+    }
+
+    #[test]
+    fn successful_injection_writes_exact_confirmed_fact() {
+        let tmp = Tmp::new();
+        let roster = [crate::events::AgentEntry {
+            id: "1".into(),
+            name: "cyris".into(),
+            pane: "%1".into(),
+            status: "working".into(),
+            title: String::new(),
+            cwd: String::new(),
+        }];
+        log_inject_in(&tmp.0, &roster, "%1", "跑測試", 0).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap(),
+            "{\"ts\":\"1970-01-01T00:00:00Z\",\"verb\":\"inject\",\"pane\":\"%1\",\"text\":\"跑測試\",\"agent\":\"cyris\"}\n"
+        );
+
+        // Unknown pane: the name is dropped, every other field stays put.
+        let empty = Tmp::new();
+        log_inject_in(&empty.0, &[], "%1", "跑測試", 0).unwrap();
+        let row = std::fs::read_to_string(empty.0.join("memory.jsonl")).unwrap();
+        assert!(!row.contains("agent"));
+        assert_eq!(
+            row,
+            "{\"ts\":\"1970-01-01T00:00:00Z\",\"verb\":\"inject\",\"pane\":\"%1\",\"text\":\"跑測試\"}\n"
+        );
     }
 }
