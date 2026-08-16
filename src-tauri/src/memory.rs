@@ -50,6 +50,30 @@ fn turn_rows_in(path: &Path) -> Vec<(String, String)> {
 
 static APPEND_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Serialize)]
+struct TurnRow<'a> {
+    ts: String,
+    verb: &'static str,
+    user: &'a str,
+    assistant: &'a str,
+}
+
+pub(crate) fn append_turn_in(
+    dir: &Path,
+    user: &str,
+    assistant: &str,
+    unix_secs: i64,
+) -> Result<(), String> {
+    let row = serde_json::to_string(&TurnRow {
+        ts: crate::sumvox::rfc3339_utc(unix_secs),
+        verb: "turn",
+        user,
+        assistant,
+    })
+    .expect("serializing a memory row cannot fail");
+    append_row_in(dir, &row, ROTATE_MAX_BYTES)
+}
+
 
 #[derive(Serialize)]
 struct ActionRow<'a> {

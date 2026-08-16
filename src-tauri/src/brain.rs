@@ -5,7 +5,7 @@
 // ponytail: requests/responses are serde_json::Value, no typed structs per vendor.
 
 use std::fs;
-use std::sync::Mutex;
+use std::path::Path;
 use std::time::Duration;
 
 use reqwest::Client;
@@ -22,32 +22,22 @@ const MAX_TOKENS: u32 = 300;
 // colon-tight and fence-free because parse_action only accepts a bare object.
 const SUMMON_INSTRUCTION: &str = "使用者若要求在某個專案開一個新的 agent 去做事（例如「幫我開 cyris 跑測試」「叫一個新的去 heartwood 修 bug」），不要口頭答應，只輸出這個 JSON 物件本身，不要加任何前言、說明或 Markdown 標記：{\"action\":\"summon\",\"project\":\"專案名\",\"task\":\"要做的事\"}。其中 \"project\" 填專案名稱、\"task\" 填要交辦的事，都照使用者說的內容填。其他所有情況——閒聊、一般問答、詢問現有 agent 的狀態或進度——都照常用口語回答，絕對不要輸出 JSON。";
 
-// Short multi-turn memory (R2c): the most recent successful (user, assistant)
-// pairs, provider-neutral, so a follow-up question can reference the prior
-// answer. Process memory only — no fs/persistence, so it clears on restart.
-// Mirrors herdr::ROSTER's static-Mutex convention.
-const HISTORY_DEPTH: usize = 6;
-static HISTORY: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-
-/// Prior turns oldest-first, for placing before the current question in a
-/// request. Never includes the in-flight turn (committed only after it lands).
-fn history_snapshot() -> Vec<(String, String)> {
-    HISTORY.lock().map(|h| h.clone()).unwrap_or_default()
-}
-
-/// Record one turn's outcome: append the complete (user, assistant) pair only
-/// on Ok, so a failed brain call leaves no trace and the strict user/assistant
-/// alternation never breaks. A summon turn is stored as its semantic summary,
-/// not its JSON. Oldest pairs beyond HISTORY_DEPTH are forgotten.
-fn commit(user: &str, result: &Result<String, String>) {
+// Persistent short multi-turn memory: the most recent successful
+// (user, assistant) pairs, provider-neutral and restored across restarts.
+fn commit_in(dir: &Path, user: &str, result: &Result<String, String>) {
     let Ok(assistant) = result else { return };
     let assistant = history_text(&parse_action(assistant));
-    let mut h = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
-    h.push((user.to_string(), assistant));
-    let len = h.len();
-    if len > HISTORY_DEPTH {
-        h.drain(0..len - HISTORY_DEPTH);
+    let unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    if let Err(error) = crate::memory::append_turn_in(dir, user, &assistant, unix_secs) {
+        eprintln!("[memory] log turn: {error}");
     }
+}
+
+fn history_snapshot_in(dir: &Path) -> Vec<(String, String)> {
+    crate::memory::history_snapshot_in(dir)
 }
 
 /// What one brain reply amounts to: something to say out loud, or a request to
@@ -401,10 +391,11 @@ pub async fn ask(
 ) -> Result<String, String> {
     // Snapshot prior turns BEFORE the call; commit this turn AFTER it resolves.
     // The current question never leaks into the history it is sent with, and a
-    // failed turn (any path) is discarded by commit's Ok-only append.
-    let history = history_snapshot();
+    // failed turn (any path) leaves no disk row.
+    let dir = crate::config::config_dir();
+    let history = history_snapshot_in(&dir);
     let result = ask_once(transcript, roster, depth, &history).await;
-    commit(transcript, &result);
+    commit_in(&dir, transcript, &result);
     result
 }
 
@@ -856,12 +847,27 @@ mod tests {
     }
 
     // --- R2c: short multi-turn memory ---
-    // These tests mutate the shared HISTORY static; serialize them and reset at
-    // the top of each (the lock only serializes, it does not reset state).
-    static HISTORY_TEST_LOCK: Mutex<()> = Mutex::new(());
+    struct Tmp(std::path::PathBuf);
 
-    fn reset_history() {
-        *HISTORY.lock().unwrap_or_else(|e| e.into_inner()) = Vec::new();
+    impl Tmp {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "shikigami-brain-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn pair(u: &str, a: &str) -> (String, String) {
@@ -871,21 +877,19 @@ mod tests {
     // ConversationHistoryRetention
     #[test]
     fn chr1_records_pairs_in_order() {
-        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_history();
-        commit("q1", &Ok("a1".to_string()));
-        commit("q2", &Ok("a2".to_string()));
-        assert_eq!(history_snapshot(), vec![pair("q1", "a1"), pair("q2", "a2")]);
+        let tmp = Tmp::new();
+        commit_in(&tmp.0, "q1", &Ok("a1".to_string()));
+        commit_in(&tmp.0, "q2", &Ok("a2".to_string()));
+        assert_eq!(history_snapshot_in(&tmp.0), vec![pair("q1", "a1"), pair("q2", "a2")]);
     }
 
     #[test]
     fn chr2_forgets_oldest_beyond_depth() {
-        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_history();
+        let tmp = Tmp::new();
         for i in 1..=7 {
-            commit(&format!("q{i}"), &Ok(format!("a{i}")));
+            commit_in(&tmp.0, &format!("q{i}"), &Ok(format!("a{i}")));
         }
-        let snap = history_snapshot();
+        let snap = history_snapshot_in(&tmp.0);
         assert_eq!(snap.len(), 6);
         assert!(!snap.iter().any(|(u, _)| u == "q1"));
         assert_eq!(snap.first().unwrap().0, "q2");
@@ -895,28 +899,40 @@ mod tests {
     // FailedTurnDiscarded
     #[test]
     fn ftd1_err_leaves_history_empty() {
-        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_history();
-        commit("q", &Err("boom".to_string()));
-        assert!(history_snapshot().is_empty());
+        let tmp = Tmp::new();
+        commit_in(&tmp.0, "q", &Err("boom".to_string()));
+        assert!(history_snapshot_in(&tmp.0).is_empty());
     }
 
     #[test]
     fn ftd2_ok_appends_pair() {
-        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_history();
-        commit("q", &Ok("a".to_string()));
-        assert_eq!(history_snapshot(), vec![pair("q", "a")]);
+        let tmp = Tmp::new();
+        commit_in(&tmp.0, "q", &Ok("a".to_string()));
+        assert_eq!(history_snapshot_in(&tmp.0), vec![pair("q", "a")]);
     }
 
     #[test]
     fn ftd3_failed_turn_does_not_break_alternation() {
-        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_history();
-        commit("q1", &Ok("a1".to_string()));
-        commit("q2", &Err("boom".to_string()));
-        commit("q3", &Ok("a3".to_string()));
-        assert_eq!(history_snapshot(), vec![pair("q1", "a1"), pair("q3", "a3")]);
+        let tmp = Tmp::new();
+        commit_in(&tmp.0, "q1", &Ok("a1".to_string()));
+        commit_in(&tmp.0, "q2", &Err("boom".to_string()));
+        commit_in(&tmp.0, "q3", &Ok("a3".to_string()));
+        assert_eq!(history_snapshot_in(&tmp.0), vec![pair("q1", "a1"), pair("q3", "a3")]);
+    }
+
+    #[test]
+    fn successful_turn_row_has_timestamp_and_log_keeps_all_rows() {
+        let tmp = Tmp::new();
+        for i in 1..=7 {
+            commit_in(&tmp.0, &format!("q{i}"), &Ok(format!("a{i}")));
+        }
+        let text = std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 7);
+        let first: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(first["verb"], "turn");
+        assert_eq!(first["user"], "q1");
+        assert_eq!(first["assistant"], "a1");
+        assert!(first["ts"].as_str().unwrap().ends_with('Z'));
     }
 
     // RequestCarriesHistory
@@ -1174,13 +1190,10 @@ mod tests {
         // is Summon; an ordinary question -> Speak (no false trigger).
         // --nocapture prints both replies as the transcript Review asks for.
         // run: <PROVIDER>_API_KEY=... cargo test sap9_live -- --ignored --nocapture
-        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_history();
         let summon = tauri::async_runtime::block_on(ask("幫我開 cyris 跑測試", &[], &[])).unwrap();
         println!("summon turn reply: {summon}");
         assert!(matches!(parse_action(&summon), SummonAction::Summon { .. }));
 
-        reset_history();
         let qa = tauri::async_runtime::block_on(ask("現在誰在工作", &[], &[])).unwrap();
         println!("q&a turn reply: {qa}");
         assert!(matches!(parse_action(&qa), SummonAction::Speak(_)));
@@ -1189,10 +1202,9 @@ mod tests {
     // SummonHistoryCommit
     #[test]
     fn shc1_summon_turn_remembered_as_sentence() {
-        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_history();
-        commit("幫我開 cyris 跑測試", &Ok(SUMMON_JSON.to_string()));
-        let (_, assistant) = history_snapshot().pop().unwrap();
+        let tmp = Tmp::new();
+        commit_in(&tmp.0, "幫我開 cyris 跑測試", &Ok(SUMMON_JSON.to_string()));
+        let (_, assistant) = history_snapshot_in(&tmp.0).pop().unwrap();
         assert_eq!(assistant, "（召喚 cyris：跑測試）");
         assert!(!assistant.contains('{'));
         assert!(!assistant.contains("action"));
@@ -1200,18 +1212,16 @@ mod tests {
 
     #[test]
     fn shc2_spoken_turn_stored_verbatim() {
-        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_history();
-        commit("你好嗎", &Ok("你好".to_string()));
-        assert_eq!(history_snapshot().pop().unwrap().1, "你好");
+        let tmp = Tmp::new();
+        commit_in(&tmp.0, "你好嗎", &Ok("你好".to_string()));
+        assert_eq!(history_snapshot_in(&tmp.0).pop().unwrap().1, "你好");
     }
 
     #[test]
     fn shc3_failed_summon_turn_not_recorded() {
-        let _g = HISTORY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_history();
-        commit("幫我開 cyris 跑測試", &Err("boom".to_string()));
-        assert!(history_snapshot().is_empty());
+        let tmp = Tmp::new();
+        commit_in(&tmp.0, "幫我開 cyris 跑測試", &Err("boom".to_string()));
+        assert!(history_snapshot_in(&tmp.0).is_empty());
     }
 
     // MultiTurnLiveRecall — live end-to-end, stays #[ignore] (needs herdr + key).
