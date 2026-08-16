@@ -213,9 +213,13 @@ fn append_row_in(dir: &Path, row: &str, cap: u64) -> Result<(), String> {
     if fs::metadata(&current).map(|m| m.len() >= cap).unwrap_or(false) {
         let previous = dir.join("memory.jsonl.1");
         if previous.exists() {
-            fs::remove_file(&previous).map_err(|e| e.to_string())?;
+            if let Err(e) = fs::remove_file(&previous) {
+                eprintln!("[memory] rotate: {e}");
+            }
         }
-        fs::rename(&current, previous).map_err(|e| e.to_string())?;
+        if let Err(e) = fs::rename(&current, &previous) {
+            eprintln!("[memory] rotate: {e}");
+        }
     }
     let mut file = OpenOptions::new()
         .create(true)
@@ -320,6 +324,20 @@ mod tests {
         append_row_in(&short.0, r#"{"a":1}"#, ROTATE_MAX_BYTES).unwrap();
         append_row_in(&short.0, r#"{"b":2}"#, ROTATE_MAX_BYTES).unwrap();
         assert!(!short.0.join("memory.jsonl.1").exists());
+    }
+
+    #[test]
+    fn memory_append_survives_a_failed_rotation() {
+        let tmp = Tmp::new();
+        std::fs::write(tmp.0.join("memory.jsonl"), "0123456789\n").unwrap();
+        let previous = tmp.0.join("memory.jsonl.1");
+        std::fs::create_dir(&previous).unwrap();
+        std::fs::write(previous.join("blocker"), "x").unwrap();
+
+        assert!(append_row_in(&tmp.0, "x", 10).is_ok());
+        let rows = std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap();
+        assert_eq!(rows, "0123456789\nx\n");
+        assert!(previous.is_dir());
     }
 
     #[test]
