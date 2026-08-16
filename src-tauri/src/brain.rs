@@ -1224,6 +1224,15 @@ mod tests {
         assert!(history_snapshot_in(&tmp.0).is_empty());
     }
 
+    #[test]
+    fn summon_commit_never_persists_action_json() {
+        let tmp = Tmp::new();
+        commit_in(&tmp.0, "幫我開 cyris 跑測試", &Ok(SUMMON_JSON.to_string()));
+        let row = std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap();
+        assert!(row.contains("（召喚 cyris：跑測試）"));
+        assert!(!row.contains(r#""action":"summon""#));
+    }
+
     // MultiTurnLiveRecall — live end-to-end, stays #[ignore] (needs herdr + key).
     #[test]
     #[ignore]
