@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use serde::Serialize;
+use crate::events::AgentEntry;
+
 
 pub const HISTORY_DEPTH: usize = 6;
 pub const ROTATE_MAX_BYTES: u64 = 1_048_576;
@@ -44,6 +46,10 @@ fn action_row(
 
 pub(crate) fn ensure_dir(dir: &Path) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())
+}
+
+fn pane_name<'a>(roster: &'a [AgentEntry], pane: &str) -> Option<&'a str> {
+    roster.iter().find(|entry| entry.pane == pane).map(|entry| entry.name.as_str())
 }
 
 fn append_row_in(dir: &Path, row: &str, cap: u64) -> Result<(), String> {
@@ -172,5 +178,20 @@ mod tests {
         let file = tmp.0.join("f");
         std::fs::write(&file, "x").unwrap();
         assert!(ensure_dir(&file.join("x")).is_err());
+    }
+
+    #[test]
+    fn pane_name_uses_only_exact_roster_matches() {
+        let roster = [crate::events::AgentEntry {
+            id: "1".into(),
+            name: "cyris".into(),
+            pane: "%1".into(),
+            status: "working".into(),
+            title: String::new(),
+            cwd: String::new(),
+        }];
+        assert_eq!(pane_name(&roster, "%1"), Some("cyris"));
+        assert_eq!(pane_name(&roster, "%9"), None);
+        assert_eq!(pane_name(&[], "%1"), None);
     }
 }
