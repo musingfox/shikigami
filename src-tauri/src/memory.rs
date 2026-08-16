@@ -130,4 +130,30 @@ mod tests {
         assert_eq!(rows.lines().count(), 8);
         assert!(rows.lines().all(|row| row == "same-width"));
     }
+
+    #[test]
+    fn memory_rotation_keeps_one_previous_generation() {
+        assert_eq!(ROTATE_MAX_BYTES, 1_048_576);
+        let tmp = Tmp::new();
+        append_row_in(&tmp.0, "0123456789", 10).unwrap();
+        append_row_in(&tmp.0, "x", 10).unwrap();
+        assert_eq!(std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap(), "x\n");
+        assert_eq!(
+            std::fs::read_to_string(tmp.0.join("memory.jsonl.1")).unwrap(),
+            "0123456789\n"
+        );
+
+        append_row_in(&tmp.0, "0123456789", 10).unwrap();
+        append_row_in(&tmp.0, "y", 10).unwrap();
+        assert_eq!(std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap(), "y\n");
+        assert_eq!(
+            std::fs::read_to_string(tmp.0.join("memory.jsonl.1")).unwrap(),
+            "x\n0123456789\n"
+        );
+
+        let short = Tmp::new();
+        append_row_in(&short.0, r#"{"a":1}"#, ROTATE_MAX_BYTES).unwrap();
+        append_row_in(&short.0, r#"{"b":2}"#, ROTATE_MAX_BYTES).unwrap();
+        assert!(!short.0.join("memory.jsonl.1").exists());
+    }
 }
