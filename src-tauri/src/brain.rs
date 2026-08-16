@@ -992,6 +992,23 @@ mod tests {
         assert_eq!(g["contents"][0]["parts"][0]["text"], "hi");
     }
 
+    #[test]
+    fn fact_rows_never_enter_anthropic_or_gemini_requests() {
+        let tmp = Tmp::new();
+        std::fs::write(
+            tmp.0.join("memory.jsonl"),
+            "{\"verb\":\"inject\",\"text\":\"祕密指令ZZZ\"}\n{\"verb\":\"turn\",\"user\":\"q\",\"assistant\":\"a\"}\n",
+        )
+        .unwrap();
+        let history = history_snapshot_in(&tmp.0);
+        for provider in [Provider::Anthropic, Provider::Gemini] {
+            let request = build_request(provider, "now", &[], &[], &history, None).to_string();
+            assert!(request.contains("\"a\""));
+            assert!(!request.contains("祕密指令ZZZ"));
+            assert!(!request.contains("\"verb\""));
+        }
+    }
+
     // RosterFreshNotInHistory
     #[test]
     fn rfh1_roster_in_system_history_user_verbatim() {
