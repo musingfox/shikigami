@@ -52,6 +52,16 @@ fn pane_name<'a>(roster: &'a [AgentEntry], pane: &str) -> Option<&'a str> {
     roster.iter().find(|entry| entry.pane == pane).map(|entry| entry.name.as_str())
 }
 
+pub(crate) fn keep_action_result<T>(
+    action: Result<T, String>,
+    memory: Result<(), String>,
+) -> Result<T, String> {
+    if let Err(error) = memory {
+        eprintln!("[memory] append: {error}");
+    }
+    action
+}
+
 fn unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -246,5 +256,19 @@ mod tests {
             row,
             "{\"ts\":\"1970-01-01T00:00:00Z\",\"verb\":\"inject\",\"pane\":\"%1\",\"text\":\"跑測試\"}\n"
         );
+    }
+
+    #[test]
+    fn memory_failure_never_changes_action_result() {
+        assert_eq!(
+            keep_action_result(Ok("%9"), Err("boom".to_string())),
+            Ok("%9")
+        );
+        assert_eq!(
+            keep_action_result::<&str>(Err("herdr down".to_string()), Ok(())),
+            Err("herdr down".to_string())
+        );
+        let tmp = Tmp::new();
+        assert!(log_inject_in(&tmp.0.join("missing"), &[], "%1", "x", 0).is_err());
     }
 }

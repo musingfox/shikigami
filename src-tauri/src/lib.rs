@@ -135,11 +135,12 @@ async fn summon_agent(project: String, task: String, cwd: String) -> Result<Stri
 
 #[tauri::command]
 fn prompt_agent(pane: String, text: String) -> Result<(), String> {
-    herdr::prompt_agent(pane.clone(), text.clone())?;
-    if let Err(error) = memory::log_inject(&herdr::get_roster(), &pane, &text) {
-        eprintln!("[memory] log inject: {error}");
-    }
-    Ok(())
+    let result = herdr::prompt_agent(pane.clone(), text.clone());
+    let Ok(()) = &result else {
+        return result;
+    };
+    let logged = memory::log_inject(&herdr::get_roster(), &pane, &text);
+    memory::keep_action_result(result, logged)
 }
 
 /// Roster agent names for the STT vocab bias — spoken agent names should
