@@ -199,6 +199,9 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![read_file, process_utterance, transcribe_utterance, toggle_mute, get_muted, open_config, quit_app, toggle_listening, set_listening, summon_agent, herdr::get_roster, herdr::focus_agent, herdr::prompt_agent])
         .setup(|app| {
+            if let Err(error) = memory::ensure_dir(&config::config_dir()) {
+                eprintln!("[memory] create config dir: {error}");
+            }
             tray::init(app.handle())?;
             sumvox::spawn_watcher(app.handle().clone());
             herdr::spawn_watcher(app.handle().clone());

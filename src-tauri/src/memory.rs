@@ -42,6 +42,10 @@ fn action_row(
     .expect("serializing a memory row cannot fail")
 }
 
+pub(crate) fn ensure_dir(dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())
+}
+
 fn append_row_in(dir: &Path, row: &str, cap: u64) -> Result<(), String> {
     let _guard = APPEND_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let current = dir.join("memory.jsonl");
@@ -155,5 +159,18 @@ mod tests {
         append_row_in(&short.0, r#"{"a":1}"#, ROTATE_MAX_BYTES).unwrap();
         append_row_in(&short.0, r#"{"b":2}"#, ROTATE_MAX_BYTES).unwrap();
         assert!(!short.0.join("memory.jsonl.1").exists());
+    }
+
+    #[test]
+    fn memory_directory_creation_is_recursive_and_idempotent() {
+        let tmp = Tmp::new();
+        let nested = tmp.0.join("a/b/c");
+        ensure_dir(&nested).unwrap();
+        assert!(nested.is_dir());
+        ensure_dir(&nested).unwrap();
+
+        let file = tmp.0.join("f");
+        std::fs::write(&file, "x").unwrap();
+        assert!(ensure_dir(&file.join("x")).is_err());
     }
 }
