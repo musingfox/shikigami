@@ -50,15 +50,22 @@ summoned; this app is how you hear from and speak to them.
 
 ```
 ① OBSERVE (inbound)         agent event → avatar reaction + spoken report
-                            DONE for coarse status (idle/working/blocked);
-                            "what is it stuck ON" needs R-observe
+                            DONE incl. depth (R-observe, 2026-08-16): the brain
+                            gets the hook's own words + a pane excerpt, so it
+                            answers "stuck on WHAT", and says 不知道 when it has
+                            nothing rather than inventing a source
 ② COMMAND (outbound)        you speak → STT → brain → act (inject) → speak back
-                            STT/brain/speak DONE 2026-07-15 (answer-only); act lands in R2
+                            DONE: answer 2026-07-15, targeted inject + summon
+                            (R2a-d, 2026-07-26/08-12) — confirm before both
 ```
 
-## Current state (2026-07-23)
+## Current state (2026-08-16)
 
-M0 skeleton + M1 channel ① + M2 voice Q&A are **built and verified**:
+**R0–R2 and R-observe are built, verified, and on `main`.** Both channels are
+closed loops: it tells you what each agent is doing *and why it is stuck*, and
+you can talk back to a named agent or summon a new one — each behind a confirm.
+
+Shell and voice Q&A:
 
 - Tauri 2, vanilla TS + Vite (bun), deps = tauri + global-shortcut plugin only
 - Transparent undecorated always-on-top window, whole-window drag,
@@ -76,14 +83,48 @@ M0 skeleton + M1 channel ① + M2 voice Q&A are **built and verified**:
 - Radial settings menu (right-click orb), orb gestures: double-click = talk,
   press+hold = drag
 
+Seeing and speaking to N (R1/R2, 2026-07-23 → 08-12):
+
+- **herdr adapter** (`herdr.rs`, 2s poll of `agent.list`) → `agent:roster` /
+  `agent:status`; **CC hooks source** (`cchooks.rs`, 500ms spool tail) →
+  `agent:activity`. Roster bubbles arc around the orb, idle ones collapse
+  behind `+N`
+- **Targeted talk** (R2a): bubble 🎙 → transcribe → editable confirm →
+  `agent.prompt`. **Voice summon** (R2d): confirm → herdr tab → type `claude`
+  in the pane → brief it. Never `agent.start` — see the summon note below
+- Brain has the live roster in its system prompt + 6 turns of memory
+  (in-process only — durability is R-memory)
+
+Depth of observation (R-observe, 2026-08-16, `main` @ `f352e16`):
+
+- **`depth.rs`** — on-demand only, never on a polling path. Per utterance it
+  takes the hook's precise signal (`notification.message` /
+  `stop.last_assistant_message`, parsed in `cchooks.rs`, snake_case with
+  camelCase fallback) plus, for ≤3 blocked/working agents, a `pane.read`
+  excerpt. Bounded: 6 lines/200 chars precise, 12/600 screen, 2000 global,
+  truncated by char with the tail kept
+- `render_roster` now marks status as herdr's screen *inference*, and the depth
+  block is fenced as observed output, not instruction
+- The join key is herdr's `pane_id` == the hook's `HERDR_PANE_ID`. The screen
+  half is verified live (`vdp_t2`); **the hook half is not yet** — see the
+  archived ticket's "未收齊的收據"
+- `AgentEntry` and `events.ts` deliberately untouched: depth reaches the brain
+  only. Showing it in the UI is a separate, unopened ticket
+
 ## Architecture
 
-See `ARCHITECTURE.md` — hexagonal, one core event contract
-(`agent:speech` / `agent:report` / `voice:muted`, defined in
-`src-tauri/src/events.rs` + mirrored in `src/events.ts`). Iron rules:
+See `ARCHITECTURE.md` — hexagonal, one core event contract: 8 constants in
+`src-tauri/src/events.rs` (`agent:speech` / `agent:report` / `agent:roster` /
+`agent:status` / `agent:activity` / `voice:muted` / `voice:listening` /
+`voice:transcript`), hand-mirrored in `src/events.ts` — **no codegen, no
+drift check**, so the two files are kept in sync by discipline alone. Iron
+rules:
 
 1. Frontend subscribes to core events only; adapter formats never cross into TS.
-2. Everything SumVox-specific lives inside `src-tauri/src/sumvox.rs`.
+2. Everything SumVox-specific lives inside `src-tauri/src/sumvox.rs`; likewise
+   herdr's wire shape inside `herdr.rs`. Depth normalization (`depth.rs`) works
+   on core types only — that is why the live-roster helper it needed returns
+   `Vec<AgentEntry>` rather than exposing herdr's `call`.
 3. New agent source = one Rust module normalizing into core events + one
    registration line in `lib.rs`. Nothing else changes.
 
@@ -170,11 +211,15 @@ speak to N, then breadth. Avatar/Linux are off the critical path.
   (ask when ambiguous, never guess) → inject via `pane.send_text` with
   **confirm-before-inject** → multi-turn brain memory. Accept: "叫X跑測試" →
   confirm → text lands in X's pane. Product thesis proven here.
-- **R-observe — depth of what it sees** (2026-08-10, promoted out of R1):
-  `AgentEntry` carries one 5-way status plus a terminal title, so the brain can
-  say "A is stuck" but never "stuck on what". A stronger brain over that input
-  still only produces a status board — depth is upstream of intelligence.
-  Ticket `r-observe-depth`.
+- **R-observe — depth of what it sees** — **DONE 2026-08-16** (`f352e16`).
+  The premise held: the depth was already arriving and being thrown away —
+  `cchooks::parse_line` kept kind/session/pane/ts and dropped the payload that
+  carried "Claude needs your permission". Fixing that cost zero new IO;
+  `pane.read` was only needed for the cold-start gap. Two findings worth
+  keeping: the brain will **invent** a source when it has none unless the
+  prompt forbids it (only a live test caught that — `cargo test` never can),
+  and 3.4% of hook lines carry content but no pane, so they can never be
+  attributed. Ticket archived at `pm/shikigami/archive/r-observe-depth.md`.
 - **R-memory — memory that survives a restart** (2026-08-10, promoted out of
   R2's tail): brain history is 6 turns in a process `Mutex`, gone on restart.
   JARVIS needs yesterday's assignments, not the last six lines. Independent of
