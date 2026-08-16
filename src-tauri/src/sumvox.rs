@@ -144,7 +144,7 @@ fn now_rfc3339() -> String {
 }
 
 // UTC seconds → "YYYY-MM-DDTHH:MM:SSZ" without a chrono dep (civil-from-days algorithm).
-fn rfc3339_utc(unix_secs: i64) -> String {
+pub(crate) fn rfc3339_utc(unix_secs: i64) -> String {
     let days = unix_secs.div_euclid(86_400);
     let tod = unix_secs.rem_euclid(86_400);
     let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);

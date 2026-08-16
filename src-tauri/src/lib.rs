@@ -3,6 +3,7 @@ mod config;
 mod events;
 mod herdr;
 mod sumvox;
+mod memory;
 mod tray;
 mod brain;
 mod voice;
