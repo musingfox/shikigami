@@ -8,6 +8,7 @@ use crate::events::AgentEntry;
 
 
 pub const HISTORY_DEPTH: usize = 6;
+pub const CURATED_MAX_CHARS: usize = 4000;
 pub const ROTATE_MAX_BYTES: u64 = 1_048_576;
 
 static APPEND_LOCK: Mutex<()> = Mutex::new(());
@@ -49,10 +50,23 @@ pub(crate) fn ensure_dir(dir: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn curated_in(dir: &Path) -> Option<String> {
-    fs::read_to_string(dir.join("MEMORY.md"))
-        .ok()
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
+    let text = fs::read_to_string(dir.join("MEMORY.md")).ok()?;
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(warning) = curated_warning(text.chars().count()) {
+        eprintln!("[memory] {warning}");
+    }
+    Some(text)
+}
+
+fn curated_warning(chars: usize) -> Option<String> {
+    (chars > CURATED_MAX_CHARS).then(|| {
+        format!(
+            "MEMORY.md has {chars} characters; recommended maximum is {CURATED_MAX_CHARS}"
+        )
+    })
 }
 
 fn pane_name<'a>(roster: &'a [AgentEntry], pane: &str) -> Option<&'a str> {
@@ -358,5 +372,21 @@ mod tests {
         let tmp = Tmp::new();
         std::fs::write(tmp.0.join("MEMORY.md"), "記得我用 fish shell\n").unwrap();
         assert_eq!(curated_in(&tmp.0), Some("記得我用 fish shell".to_string()));
+    }
+
+    #[test]
+    fn oversized_curated_memory_warns_without_truncating() {
+        let warning = curated_warning(CURATED_MAX_CHARS + 1).unwrap();
+        assert!(warning.contains("MEMORY.md"));
+        assert!(warning.contains("4000"));
+        assert_eq!(curated_warning(CURATED_MAX_CHARS), None);
+
+        let tmp = Tmp::new();
+        let content = "記".repeat(CURATED_MAX_CHARS + 1);
+        std::fs::write(tmp.0.join("MEMORY.md"), &content).unwrap();
+        let loaded = curated_in(&tmp.0).unwrap();
+        assert_eq!(loaded.chars().count(), 4001);
+        assert_eq!(loaded, content);
+        assert!(!loaded.contains('…'));
     }
 }
