@@ -17,6 +17,37 @@ pub(crate) fn fit_turn(text: &str) -> String {
     crate::depth::normalize(text, TURN_MAX_LINES, TURN_MAX_CHARS)
 }
 
+pub(crate) fn history_snapshot_in(dir: &Path) -> Vec<(String, String)> {
+    let mut current = turn_rows_in(&dir.join("memory.jsonl"));
+    if current.len() >= HISTORY_DEPTH {
+        return current.split_off(current.len() - HISTORY_DEPTH);
+    }
+
+    let mut history = turn_rows_in(&dir.join("memory.jsonl.1"));
+    history.append(&mut current);
+    if history.len() > HISTORY_DEPTH {
+        history.drain(..history.len() - HISTORY_DEPTH);
+    }
+    history
+}
+
+fn turn_rows_in(path: &Path) -> Vec<(String, String)> {
+    fs::read_to_string(path)
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|row| row["verb"] == "turn")
+                .filter_map(|row| {
+                    Some((
+                        fit_turn(row["user"].as_str()?),
+                        fit_turn(row["assistant"].as_str()?),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 static APPEND_LOCK: Mutex<()> = Mutex::new(());
 
 
@@ -420,5 +451,65 @@ mod tests {
         assert_eq!(TURN_MAX_CHARS, 400);
         assert_eq!(CURATED_MAX_CHARS, 4000);
         assert_eq!(ROTATE_MAX_BYTES, 1_048_576);
+    }
+
+    fn turn_rows(range: std::ops::RangeInclusive<usize>) -> String {
+        range
+            .map(|i| format!(r#"{{"ts":"..","verb":"turn","user":"q{i}","assistant":"a{i}"}}"#))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    #[test]
+    fn conversation_restores_six_recent_valid_turns_across_rotation() {
+        let fresh = Tmp::new();
+        assert!(history_snapshot_in(&fresh.0).is_empty());
+
+        let eight = Tmp::new();
+        std::fs::write(eight.0.join("memory.jsonl"), turn_rows(1..=8)).unwrap();
+        let history = history_snapshot_in(&eight.0);
+        assert_eq!(history.len(), 6);
+        assert_eq!(history.first().unwrap(), &("q3".into(), "a3".into()));
+        assert_eq!(history.last().unwrap(), &("q8".into(), "a8".into()));
+
+        let mixed = Tmp::new();
+        std::fs::write(
+            mixed.0.join("memory.jsonl"),
+            "garbage\n\n{\"ts\":\"..\",\"verb\":\"turn\",\"user\":\"q\",\"assistant\":\"a\"}\n",
+        )
+        .unwrap();
+        assert_eq!(history_snapshot_in(&mixed.0), vec![("q".into(), "a".into())]);
+
+        let actions = Tmp::new();
+        std::fs::write(
+            actions.0.join("memory.jsonl"),
+            "{\"verb\":\"inject\"}\n{\"verb\":\"summon\"}\n",
+        )
+        .unwrap();
+        assert!(history_snapshot_in(&actions.0).is_empty());
+
+        let rotated = Tmp::new();
+        std::fs::write(rotated.0.join("memory.jsonl.1"), turn_rows(1..=10)).unwrap();
+        std::fs::write(
+            rotated.0.join("memory.jsonl"),
+            format!(
+                "{}{{\"verb\":\"inject\",\"text\":\"x\"}}\n{}",
+                turn_rows(11..=11),
+                turn_rows(12..=12)
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            history_snapshot_in(&rotated.0),
+            (7..=12)
+                .map(|i| (format!("q{i}"), format!("a{i}")))
+                .collect::<Vec<_>>()
+        );
+
+        let enough = Tmp::new();
+        std::fs::write(enough.0.join("memory.jsonl"), turn_rows(1..=8)).unwrap();
+        std::fs::write(enough.0.join("memory.jsonl.1"), "not json at all").unwrap();
+        assert_eq!(history_snapshot_in(&enough.0).first().unwrap().0, "q3");
     }
 }
