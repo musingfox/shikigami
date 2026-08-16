@@ -48,6 +48,13 @@ pub(crate) fn ensure_dir(dir: &Path) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())
 }
 
+pub(crate) fn curated_in(dir: &Path) -> Option<String> {
+    fs::read_to_string(dir.join("MEMORY.md"))
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
 fn pane_name<'a>(roster: &'a [AgentEntry], pane: &str) -> Option<&'a str> {
     roster.iter().find(|entry| entry.pane == pane).map(|entry| entry.name.as_str())
 }
@@ -332,5 +339,17 @@ mod tests {
         let row = std::fs::read_to_string(known.0.join("memory.jsonl")).unwrap();
         assert!(row.contains(r#""project":"cyris""#));
         assert!(row.contains(r#""agent":"cyris-2""#));
+    }
+
+    #[test]
+    fn absent_unreadable_or_blank_curated_memory_is_ignored() {
+        let tmp = Tmp::new();
+        assert_eq!(curated_in(&tmp.0), None);
+        std::fs::create_dir(tmp.0.join("MEMORY.md")).unwrap();
+        assert_eq!(curated_in(&tmp.0), None);
+
+        let blank = Tmp::new();
+        std::fs::write(blank.0.join("MEMORY.md"), "   \n\n").unwrap();
+        assert_eq!(curated_in(&blank.0), None);
     }
 }

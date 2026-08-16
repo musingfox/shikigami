@@ -192,7 +192,7 @@ mod tests {
             .expect("live depth must join by the exact herdr pane_id");
         assert!(matched.precise.is_some() || matched.screen.is_some());
 
-        let prompt = crate::brain::system_prompt(&roster, &depth);
+        let prompt = crate::brain::system_prompt(&roster, &depth, None);
         println!(
             "join receipt: HERDR_PANE_ID={} herdr pane_id={}\n\nsystem prompt:\n{}",
             matched.pane, observed.pane, prompt
