@@ -8,8 +8,14 @@ use crate::events::AgentEntry;
 
 
 pub const HISTORY_DEPTH: usize = 6;
+pub const TURN_MAX_LINES: usize = 8;
+pub const TURN_MAX_CHARS: usize = 400;
 pub const CURATED_MAX_CHARS: usize = 4000;
 pub const ROTATE_MAX_BYTES: u64 = 1_048_576;
+
+pub(crate) fn fit_turn(text: &str) -> String {
+    crate::depth::normalize(text, TURN_MAX_LINES, TURN_MAX_CHARS)
+}
 
 static APPEND_LOCK: Mutex<()> = Mutex::new(());
 
@@ -388,5 +394,31 @@ mod tests {
         assert_eq!(loaded.chars().count(), 4001);
         assert_eq!(loaded, content);
         assert!(!loaded.contains('…'));
+    }
+
+    #[test]
+    fn history_turns_keep_only_bounded_unicode_tail() {
+        let long = "a".repeat(500);
+        let fitted = fit_turn(&long);
+        assert_eq!(fitted.chars().count(), 401);
+        assert!(fitted.starts_with('…'));
+        assert_eq!(fitted.chars().skip(1).collect::<String>(), "a".repeat(400));
+        assert_eq!(fit_turn("你好"), "你好");
+        assert_eq!(fit_turn(&"界".repeat(400)), "界".repeat(400));
+
+        let lines = (1..=12)
+            .map(|i| format!("{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fitted = fit_turn(&lines);
+        assert!(fitted.starts_with('…'));
+        assert_eq!(fitted.lines().count(), 8);
+        assert!(fitted.ends_with("012"));
+
+        assert_eq!(HISTORY_DEPTH, 6);
+        assert_eq!(TURN_MAX_LINES, 8);
+        assert_eq!(TURN_MAX_CHARS, 400);
+        assert_eq!(CURATED_MAX_CHARS, 4000);
+        assert_eq!(ROTATE_MAX_BYTES, 1_048_576);
     }
 }
