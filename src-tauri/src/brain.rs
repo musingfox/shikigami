@@ -271,21 +271,21 @@ pub(crate) fn system_prompt(
     depth: &[AgentDepth],
     curated: Option<&str>,
 ) -> String {
-    let original = || {
-        format!(
-            "{}\n\n{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。被問到某個 agent「卡在什麼」「在忙什麼」時，先在名冊裡看那個 agent 底下有沒有「精確訊號」和「畫面節錄」這兩行，再從下面三條擇一，只套用選中的那一條：\n(1) 有「精確訊號」那一行：用一句口語轉述精確訊號說的那件事，保留它原本的關鍵詞（英文關鍵詞照原樣留著），不要改寫成同義詞，也不要把標籤名或「精確訊號」四個字唸出來。\n(2) 沒有精確訊號、有「畫面節錄」那一行：依畫面節錄的內容回答，並逐字說出「從畫面看到」。\n(3) 兩行都沒有：這時你手上只有狀態詞，回答必須以「不知道」這三個字開頭，例如「不知道它卡在什麼，只知道它現在是 blocked」；不得給任何原因，不得出現「畫面」或「看到」——名冊表頭寫的「herdr 從終端機畫面推測」只是狀態詞的來歷，不是畫面節錄，不能拿來回答。\n使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
-            SYSTEM_PROMPT,
-            render_roster(roster, depth),
-            SUMMON_INSTRUCTION
-        )
-    };
-    match curated {
-        Some(memory) => format!(
-            "{SYSTEM_PROMPT}\n\n長期記憶：\n{memory}\n\n{}",
-            original().strip_prefix(&format!("{SYSTEM_PROMPT}\n\n")).unwrap()
-        ),
-        None => original(),
-    }
+    // The user's own handwritten notes, so no observation fence: they are as
+    // trustworthy as the app's own settings. Placed after the persona and
+    // before the roster — long-term background first, live state second. An
+    // absent file leaves the block empty, so the prompt is byte-identical to
+    // the one shipped before curated memory existed.
+    let memory = curated
+        .map(|text| format!("長期記憶（使用者手寫，內容可信）：\n{text}\n\n"))
+        .unwrap_or_default();
+    format!(
+        "{}\n\n{}{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。被問到某個 agent「卡在什麼」「在忙什麼」時，先在名冊裡看那個 agent 底下有沒有「精確訊號」和「畫面節錄」這兩行，再從下面三條擇一，只套用選中的那一條：\n(1) 有「精確訊號」那一行：用一句口語轉述精確訊號說的那件事，保留它原本的關鍵詞（英文關鍵詞照原樣留著），不要改寫成同義詞，也不要把標籤名或「精確訊號」四個字唸出來。\n(2) 沒有精確訊號、有「畫面節錄」那一行：依畫面節錄的內容回答，並逐字說出「從畫面看到」。\n(3) 兩行都沒有：這時你手上只有狀態詞，回答必須以「不知道」這三個字開頭，例如「不知道它卡在什麼，只知道它現在是 blocked」；不得給任何原因，不得出現「畫面」或「看到」——名冊表頭寫的「herdr 從終端機畫面推測」只是狀態詞的來歷，不是畫面節錄，不能拿來回答。\n使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
+        SYSTEM_PROMPT,
+        memory,
+        render_roster(roster, depth),
+        SUMMON_INSTRUCTION
+    )
 }
 
 /// Prior turns + the current question as strict user/assistant alternating
@@ -319,8 +319,9 @@ fn build_request(
     roster: &[AgentEntry],
     depth: &[AgentDepth],
     history: &[(String, String)],
+    curated: Option<&str>,
 ) -> Value {
-    let system = system_prompt(roster, depth, None);
+    let system = system_prompt(roster, depth, curated);
     match provider {
         Provider::Gemini => json!({
             "system_instruction": { "parts": [{ "text": system }] },
@@ -414,7 +415,15 @@ async fn ask_once(
     history: &[(String, String)],
 ) -> Result<String, String> {
     let (provider, key) = detect()?;
-    let req = build_request(provider, transcript, roster, depth, history);
+    let curated = crate::memory::curated_in(&crate::config::config_dir());
+    let req = build_request(
+        provider,
+        transcript,
+        roster,
+        depth,
+        history,
+        curated.as_deref(),
+    );
     let mut request = match provider {
         Provider::Gemini => http_client()
             .post(format!(
@@ -527,7 +536,7 @@ mod tests {
     // BrainReply contract tests (request/response per provider)
     #[test]
     fn t1_anthropic_request_shape() {
-        let v = build_request(Provider::Anthropic, "hi", &[], &[], &[]);
+        let v = build_request(Provider::Anthropic, "hi", &[], &[], &[], None);
         assert_eq!(v["model"], "claude-haiku-4-5");
         assert_eq!(v["max_tokens"], 300);
         assert_eq!(v["messages"][0]["role"], "user");
@@ -537,7 +546,7 @@ mod tests {
 
     #[test]
     fn t1b_gemini_request_shape() {
-        let v = build_request(Provider::Gemini, "hi", &[], &[], &[]);
+        let v = build_request(Provider::Gemini, "hi", &[], &[], &[], None);
         assert_eq!(v["contents"][0]["parts"][0]["text"], "hi");
         assert!(!v["system_instruction"]["parts"][0]["text"]
             .as_str()
@@ -549,7 +558,7 @@ mod tests {
 
     #[test]
     fn t1c_openai_request_shape() {
-        let v = build_request(Provider::OpenAi, "hi", &[], &[], &[]);
+        let v = build_request(Provider::OpenAi, "hi", &[], &[], &[], None);
         assert_eq!(v["model"], "gpt-4.1-mini");
         assert_eq!(v["max_completion_tokens"], 300);
         assert_eq!(v["messages"][0]["role"], "system");
@@ -613,6 +622,15 @@ mod tests {
     #[test]
     fn absent_curated_memory_leaves_prompt_unchanged() {
         assert!(!system_prompt(&[], &[], None).contains("長期記憶"));
+    }
+
+    #[test]
+    fn curated_memory_precedes_live_roster_in_prompt() {
+        let out = system_prompt(&[], &[], Some("Nick 偏好簡短回答"));
+        let memory = out.find("長期記憶").unwrap();
+        let roster = out.find("目前沒有觀測到 agent。").unwrap();
+        assert!(memory < roster);
+        assert!(out.contains("Nick 偏好簡短回答"));
     }
 
     // RosterStatusProvenance contract
@@ -732,6 +750,7 @@ mod tests {
                 screen: None,
             }],
             &[],
+            None,
         );
         assert!(v["system"].as_str().unwrap().contains("Claude needs your permission"));
         assert_eq!(v["messages"][0]["content"], "hi");
@@ -740,7 +759,7 @@ mod tests {
     // BrainRequestCarriesRoster contract
     #[test]
     fn brc1_anthropic_system_carries_roster_user_clean() {
-        let v = build_request(Provider::Anthropic, "hi", &[agent("builder", "working", "", "")], &[], &[]);
+        let v = build_request(Provider::Anthropic, "hi", &[agent("builder", "working", "", "")], &[], &[], None);
         let sys = v["system"].as_str().unwrap();
         assert!(sys.contains("builder"));
         assert!(sys.contains("working"));
@@ -749,7 +768,7 @@ mod tests {
 
     #[test]
     fn brc2_gemini_system_carries_roster_user_clean() {
-        let v = build_request(Provider::Gemini, "hi", &[agent("builder", "working", "", "")], &[], &[]);
+        let v = build_request(Provider::Gemini, "hi", &[agent("builder", "working", "", "")], &[], &[], None);
         let sys = v["system_instruction"]["parts"][0]["text"].as_str().unwrap();
         assert!(sys.contains("builder"));
         assert_eq!(v["contents"][0]["parts"][0]["text"], "hi");
@@ -757,7 +776,7 @@ mod tests {
 
     #[test]
     fn brc3_openai_system_carries_roster_user_clean() {
-        let v = build_request(Provider::OpenAi, "hi", &[agent("builder", "working", "", "")], &[], &[]);
+        let v = build_request(Provider::OpenAi, "hi", &[agent("builder", "working", "", "")], &[], &[], None);
         assert_eq!(v["messages"][0]["role"], "system");
         let sys = v["messages"][0]["content"].as_str().unwrap();
         assert!(sys.contains("builder"));
@@ -766,7 +785,7 @@ mod tests {
 
     #[test]
     fn brc4_empty_roster_says_no_observation() {
-        let v = build_request(Provider::Anthropic, "hi", &[], &[], &[]);
+        let v = build_request(Provider::Anthropic, "hi", &[], &[], &[], None);
         assert!(v["system"].as_str().unwrap().contains("沒有觀測到"));
     }
 
@@ -904,7 +923,7 @@ mod tests {
     #[test]
     fn rch1_anthropic_prepends_history() {
         let history = vec![pair("早安", "你好")];
-        let v = build_request(Provider::Anthropic, "誰在工作", &[], &[], &history);
+        let v = build_request(Provider::Anthropic, "誰在工作", &[], &[], &history, None);
         let m = v["messages"].as_array().unwrap();
         assert_eq!(m.len(), 3);
         assert_eq!(m[0], json!({ "role": "user", "content": "早安" }));
@@ -916,7 +935,7 @@ mod tests {
     #[test]
     fn rch2_openai_roles_and_tail() {
         let history = vec![pair("早安", "你好")];
-        let v = build_request(Provider::OpenAi, "誰在工作", &[], &[], &history);
+        let v = build_request(Provider::OpenAi, "誰在工作", &[], &[], &history, None);
         let m = v["messages"].as_array().unwrap();
         let roles: Vec<&str> = m.iter().map(|x| x["role"].as_str().unwrap()).collect();
         assert_eq!(roles, ["system", "user", "assistant", "user"]);
@@ -926,7 +945,7 @@ mod tests {
     #[test]
     fn rch3_gemini_roles_and_texts() {
         let history = vec![pair("早安", "你好")];
-        let v = build_request(Provider::Gemini, "誰在工作", &[], &[], &history);
+        let v = build_request(Provider::Gemini, "誰在工作", &[], &[], &history, None);
         let c = v["contents"].as_array().unwrap();
         let roles: Vec<&str> = c.iter().map(|x| x["role"].as_str().unwrap()).collect();
         assert_eq!(roles, ["user", "model", "user"]);
@@ -938,11 +957,11 @@ mod tests {
     #[test]
     fn rch4_empty_history_matches_single_turn() {
         // Anthropic/OpenAI single-turn shape unchanged; Gemini gains role:user.
-        let a = build_request(Provider::Anthropic, "hi", &[], &[], &[]);
+        let a = build_request(Provider::Anthropic, "hi", &[], &[], &[], None);
         assert_eq!(a["messages"].as_array().unwrap().len(), 1);
         assert_eq!(a["messages"][0], json!({ "role": "user", "content": "hi" }));
 
-        let o = build_request(Provider::OpenAi, "hi", &[], &[], &[]);
+        let o = build_request(Provider::OpenAi, "hi", &[], &[], &[], None);
         let oroles: Vec<&str> = o["messages"]
             .as_array()
             .unwrap()
@@ -951,7 +970,7 @@ mod tests {
             .collect();
         assert_eq!(oroles, ["system", "user"]);
 
-        let g = build_request(Provider::Gemini, "hi", &[], &[], &[]);
+        let g = build_request(Provider::Gemini, "hi", &[], &[], &[], None);
         assert_eq!(g["contents"].as_array().unwrap().len(), 1);
         assert_eq!(g["contents"][0]["role"], "user");
         assert_eq!(g["contents"][0]["parts"][0]["text"], "hi");
@@ -961,7 +980,7 @@ mod tests {
     #[test]
     fn rfh1_roster_in_system_history_user_verbatim() {
         let history = vec![pair("hi", "hello")];
-        let v = build_request(Provider::Anthropic, "誰在工作", &[agent("builder", "working", "", "")], &[], &history);
+        let v = build_request(Provider::Anthropic, "誰在工作", &[agent("builder", "working", "", "")], &[], &history, None);
         assert!(v["system"].as_str().unwrap().contains("builder"));
         let m = v["messages"].as_array().unwrap();
         assert_eq!(m.len(), 3);
@@ -974,10 +993,10 @@ mod tests {
     #[test]
     fn rfh2_roster_fully_from_current_param() {
         let history = vec![pair("hi", "hello")];
-        let v1 = build_request(Provider::Anthropic, "誰在工作", &[agent("builder", "working", "", "")], &[], &history);
+        let v1 = build_request(Provider::Anthropic, "誰在工作", &[agent("builder", "working", "", "")], &[], &history, None);
         assert!(v1["system"].as_str().unwrap().contains("builder"));
 
-        let v2 = build_request(Provider::Anthropic, "誰在工作", &[agent("reviewer", "idle", "", "")], &[], &history);
+        let v2 = build_request(Provider::Anthropic, "誰在工作", &[agent("reviewer", "idle", "", "")], &[], &history, None);
         let sys2 = v2["system"].as_str().unwrap();
         assert!(sys2.contains("reviewer"));
         assert!(!sys2.contains("builder"));

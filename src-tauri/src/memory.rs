@@ -352,4 +352,11 @@ mod tests {
         std::fs::write(blank.0.join("MEMORY.md"), "   \n\n").unwrap();
         assert_eq!(curated_in(&blank.0), None);
     }
+
+    #[test]
+    fn curated_memory_is_trimmed_but_preserved() {
+        let tmp = Tmp::new();
+        std::fs::write(tmp.0.join("MEMORY.md"), "記得我用 fish shell\n").unwrap();
+        assert_eq!(curated_in(&tmp.0), Some("記得我用 fish shell".to_string()));
+    }
 }
