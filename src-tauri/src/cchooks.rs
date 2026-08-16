@@ -18,8 +18,7 @@ use tauri::Emitter;
 static HOOK_DEPTHS: Mutex<VecDeque<HookDepth>> = Mutex::new(VecDeque::new());
 
 pub fn spool_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::path::Path::new(&home).join(".config/shikigami/hooks.ndjson")
+    crate::config::config_dir().join("hooks.ndjson")
 }
 
 /// One spool line → Activity. Malformed lines yield None and are skipped —

@@ -163,9 +163,7 @@ pub fn resolve_api_key(
 fn load_key(provider: Provider) -> Result<String, String> {
     let (env_var, file_name) = provider.key_sources();
     let env = std::env::var(env_var).ok();
-    let file = std::env::var("HOME").ok().and_then(|h| {
-        fs::read_to_string(format!("{}/.config/shikigami/{}", h, file_name)).ok()
-    });
+    let file = fs::read_to_string(crate::config::config_dir().join(file_name)).ok();
     resolve_api_key(provider, env.as_deref(), file.as_deref())
 }
 

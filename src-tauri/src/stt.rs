@@ -17,10 +17,7 @@ pub fn model_path() -> PathBuf {
     if name.starts_with('/') {
         return PathBuf::from(name);
     }
-    let mut p = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    p.push(".config/shikigami/models");
-    p.push(name);
-    p
+    crate::config::config_dir().join("models").join(name)
 }
 
 static WHISPER_CTX: OnceLock<WhisperContext> = OnceLock::new();

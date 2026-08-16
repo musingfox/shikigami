@@ -1,4 +1,5 @@
 mod cchooks;
+mod config;
 mod events;
 mod herdr;
 mod sumvox;
