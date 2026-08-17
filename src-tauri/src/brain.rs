@@ -874,6 +874,38 @@ mod tests {
         (u.to_string(), a.to_string())
     }
 
+    /// Carry provider key files into a throwaway config root — and nothing else,
+    /// so memory stays isolated. A missing key file is silent: the env-var form
+    /// is the other half of `load_key` and must keep working on its own.
+    fn copy_provider_keys(from: &std::path::Path, to: &std::path::Path) {
+        for provider in PROVIDERS {
+            let (_, file_name) = provider.key_sources();
+            if let Ok(key) = std::fs::read_to_string(from.join(file_name)) {
+                let _ = std::fs::write(to.join(file_name), key);
+            }
+        }
+    }
+
+    #[test]
+    fn provider_keys_travel_but_memory_does_not() {
+        let real = Tmp::new();
+        let throwaway = Tmp::new();
+        std::fs::write(real.0.join("anthropic_api_key"), "sk-file\n").unwrap();
+        std::fs::write(real.0.join("memory.jsonl"), "{\"role\":\"user\"}\n").unwrap();
+
+        copy_provider_keys(&real.0, &throwaway.0);
+
+        assert_eq!(
+            std::fs::read_to_string(throwaway.0.join("anthropic_api_key")).unwrap(),
+            "sk-file\n"
+        );
+        // the providers without a key file are skipped, not created empty
+        assert!(!throwaway.0.join("gemini_api_key").exists());
+        assert!(!throwaway.0.join("openai_api_key").exists());
+        // isolation intact: memory is never carried over
+        assert!(!throwaway.0.join("memory.jsonl").exists());
+    }
+
     // ConversationHistoryRetention
     #[test]
     fn chr1_records_pairs_in_order() {
@@ -1212,8 +1244,14 @@ mod tests {
         // its own throwaway root: the real memory.jsonl never receives a summon
         // that did not happen, and the Q&A half cannot read the summon turn the
         // first half just wrote.
+        //
+        // the override relocates the WHOLE config root, so a key file under the
+        // real dir would be invisible — resolve that dir before installing the
+        // override and carry the key files (only those) into the throwaway one.
+        let real_config = crate::config::config_dir();
         let ask_isolated = |transcript: &str| {
             let tmp = Tmp::new();
+            copy_provider_keys(&real_config, &tmp.0);
             let _dir = crate::config::test_override::ConfigDirOverride::set(&tmp.0);
             tauri::async_runtime::block_on(ask(transcript, &[], &[])).unwrap()
         };
