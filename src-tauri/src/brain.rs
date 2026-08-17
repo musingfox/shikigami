@@ -27,10 +27,17 @@ pub(crate) const MAX_STEPS: usize = 5;
 pub(crate) const TURN_BUDGET: Duration = Duration::from_secs(45);
 
 /// Below this, the turn counts as out of time. A guard on `is_zero()` alone would
-/// let a sliver of budget through and spend a request that reliably times out, so
-/// running out of time would surface as a provider error instead of the honest
-/// ending the loop bounds exist to produce.
-pub(crate) const MIN_STEP_BUDGET: Duration = Duration::from_secs(2);
+/// let a sliver of budget through and spend work that cannot finish, so running
+/// out of time would surface as a provider error instead of the honest ending the
+/// loop bounds exist to produce.
+///
+/// Derived, not picked: this same floor guards the tool phase, and one herdr pane
+/// read blocks for up to `herdr::CALL_TIMEOUT` (5s), so 5s is the smallest floor
+/// under which even a worst-case read still fits. It is comfortably above the one
+/// model step measured live (~1s for a request plus a pane read), and erring high
+/// is the cheap direction: too high spends a spare second on the honest ending,
+/// too low hands the user an error toast instead of an answer.
+pub(crate) const MIN_STEP_BUDGET: Duration = Duration::from_secs(5);
 
 const OUT_OF_STEPS: &str = "步數上限";
 const TIMED_OUT: &str = "時間上限";
@@ -297,7 +304,7 @@ where
     let mut results: Vec<ToolResult> = Vec::new();
     let mut consulted: Vec<String> = Vec::new();
     let mut found: Option<String> = None;
-    for _ in 0..max_steps {
+    for step in 0..max_steps {
         let budget = remaining();
         if budget < MIN_STEP_BUDGET {
             return Ok(SummonAction::Speak(exhausted_message(
@@ -322,6 +329,12 @@ where
                 if interim.is_some() {
                     found = interim;
                 }
+                // Results from the last allowed step can never reach a model, and
+                // each read costs a real socket wait — so stop before paying for
+                // answers the step cap has already thrown away.
+                if step + 1 == max_steps {
+                    break;
+                }
                 for call in calls {
                     if remaining() < MIN_STEP_BUDGET {
                         return Ok(SummonAction::Speak(exhausted_message(
@@ -332,16 +345,29 @@ where
                     }
                     match call {
                         StepAction::ReadPane { call, agent } => {
-                            let text = tools.read_pane(&agent).await;
-                            let label = format!("{agent} 的畫面");
-                            if !consulted.contains(&label) {
-                                consulted.push(label);
+                            let read = tools.read_pane(&agent).await;
+                            // Only what the tool says it actually reached, under
+                            // the roster's own name — a failed read or a name the
+                            // model invented must never be spoken as consulted.
+                            if let Some(label) = read.consulted {
+                                if !consulted.contains(&label) {
+                                    consulted.push(label);
+                                }
                             }
-                            results.push(ToolResult { call, text });
+                            results.push(ToolResult { call, text: read.text });
                         }
                         // A tool we cannot run answers with its own reason, so the
                         // model can correct itself inside the step budget instead
                         // of the turn failing.
+                        //
+                        // ponytail: unit-tested through the fake backend only —
+                        // replaying an undeclared call plus its functionResponse
+                        // has never gone over the real gemini wire, so "the turn
+                        // continues" is unverified there. Upgrade path: an
+                        // #[ignore] live case that induces a call to a tool that
+                        // does not exist. Worth doing when a second tool lands
+                        // (recall / memory), since that is when a model actually
+                        // starts guessing tool names.
                         StepAction::Rejected { call, reason } => {
                             results.push(ToolResult { call, text: reason })
                         }
@@ -1041,6 +1067,30 @@ mod tests {
             ),
             "到目前為止：builder 在跑測試。我查了 builder 的畫面，但到了步數上限，還沒有結論，要我繼續查嗎？"
         );
+    }
+
+    // A read that never landed is not a source. The model may keep asking for a
+    // pane that does not exist; the ending must not claim it was consulted.
+    #[test]
+    fn a_read_that_never_landed_is_not_claimed_as_consulted() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![read_pane("不存在")])]);
+        let tools = FakeTools::new("cargo test");
+        let message = spoken(run(&mut backend, &tools, always(45)));
+        assert!(message.contains(OUT_OF_STEPS));
+        assert!(!message.contains("不存在"));
+        assert!(message.contains("我還沒查到任何東西"));
+    }
+
+    // The step cap throws away the last step's tool results, so paying a real
+    // socket wait for them is pure latency.
+    #[test]
+    fn the_last_step_does_not_pay_for_answers_nobody_can_read() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![read_pane("builder")])]);
+        let tools = FakeTools::new("cargo test");
+        let message = spoken(run(&mut backend, &tools, always(45)));
+        assert_eq!(backend.calls(), MAX_STEPS);
+        assert_eq!(tools.reads().len(), MAX_STEPS - 1);
+        assert!(message.contains(OUT_OF_STEPS));
     }
 
     #[test]

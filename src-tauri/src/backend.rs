@@ -434,7 +434,7 @@ impl FakeTools {
 
 #[cfg(test)]
 impl crate::tools::Tools for FakeTools {
-    fn read_pane(&self, agent: &str) -> impl Future<Output = String> + Send {
+    fn read_pane(&self, agent: &str) -> impl Future<Output = crate::tools::PaneRead> + Send {
         self.reads.lock().unwrap().push(agent.to_string());
         let screen = self.screen.clone();
         std::future::ready(crate::tools::read_pane_body(&self.roster, agent, move |_| {
