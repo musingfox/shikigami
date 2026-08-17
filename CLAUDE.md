@@ -71,15 +71,17 @@ summoned; this app is how you hear from and speak to them.
 
 ## Current state (2026-08-17)
 
-**R0–R2, R-observe and R-memory are built and verified.** Both channels are
-closed loops: it tells you what each agent is doing *and why it is stuck*, and
-you can talk back to a named agent or summon a new one — each behind a confirm.
-And it now remembers across a restart.
+**R0–R2, R-observe, R-memory and R-tool-loop increment 1 are built and
+verified.** Both channels are closed loops: it tells you what each agent is doing
+*and why it is stuck*, and you can talk back to a named agent or summon a new one
+— each behind a confirm. It remembers across a restart. And it can now *look
+something up and then answer* — a real multi-step tool-use loop, verified live.
 
-What it still is **not**: an agent that acts on its own. There is no tool-use
-loop (single-shot completion + a hand-rolled JSON action), so it can answer but
-cannot *look something up and then answer*; and nothing wakes it but your voice.
-Those are `r-brain-tool-loop` and `r-brain-event-driven`.
+What it still is **not**: an agent that acts on its own. **Nothing wakes it but
+your voice** (`r-brain-event-driven`), and it still cannot search its own memory
+or write to it — `recall`, the curated-layer `memory` writer, `/context`, and
+moving depth off the prefetch path are increments 2–4 of `r-brain-tool-loop`,
+still open.
 
 Shell and voice Q&A:
 
@@ -152,6 +154,38 @@ Memory that survives a restart (R-memory, 2026-08-17):
 - Not done here, by design: `recall` / tool-use loop / model-written curated
   memory (`r-brain-tool-loop`), heartbeat (`r-brain-event-driven`), UI surfacing
 
+The loop that makes it an agent (R-tool-loop increment 1, 2026-08-17):
+
+- **`backend.rs` is the port**: a `Backend` trait whose one verb advances the turn
+  by a step and answers in provider-neutral values (`StepAction` / `ToolResult`),
+  plus provider selection and credentials. Two adapters own every wire key —
+  `backend_gemini.rs` (native `functionDeclarations`) and `backend_text.rs`
+  (openai + anthropic through the existing prose JSON-action path, `tools()` empty,
+  so their behaviour is unchanged and the loop cannot tell them apart).
+  **`brain.rs` names no provider** — the four old leak points (`build_request`,
+  `extract_reply`, the URL/header match, `Provider::model`) are gone from it
+- Bounds: **5 steps, 45s wall clock**, checked before every model step *and* every
+  tool call; the per-request HTTP timeout is `remaining.min(30s)`, so a request can
+  never outlive the turn. Below **`MIN_STEP_BUDGET` (5s)** the turn counts as out
+  of time — derived, not picked: the same floor guards the tool phase and one herdr
+  read blocks up to `CALL_TIMEOUT` (5s). Exhaustion **speaks** what it consulted
+  and that it has no conclusion; it must never go silent or invent
+- `Speak` is a variant of the step type but a bare text part on the wire, so the
+  fast path still answers in one request. **`Summon` is loop-terminal** — the loop
+  module cannot reach `herdr::summon`/`prompt_agent` at all, so the confirm is
+  non-bypassable *by construction*, not by policy
+- `read_pane(agent)` is the thin version: existing `pane_recent_text` +
+  `normalize(_, 12, 600)` on `spawn_blocking`, agent resolved against the turn's
+  roster snapshot (never a fresh socket), result fenced as observed output.
+  **The ≤3-pane prefetch is still on the fast path** — removing it is increment 2
+- `consulted` carries only panes actually reached, under the **roster's** name. A
+  failed read or a name the model invented is told to the model but never spoken
+  as a source — R-observe's invented-source defect reappeared here in new clothes
+  and the `PaneRead { text, consulted }` contract is what closes it
+- One `verb:"turn"` row per utterance regardless of step count; tool calls and
+  results are the on-demand layer and never persist. Single-attempt/no-failover is
+  **kept deliberately** and pinned by a test — not changed inside a refactor
+
 ## Architecture
 
 See `ARCHITECTURE.md` — hexagonal, one core event contract: 8 constants in
@@ -165,7 +199,9 @@ rules:
 2. Everything SumVox-specific lives inside `src-tauri/src/sumvox.rs`; likewise
    herdr's wire shape inside `herdr.rs`. Depth normalization (`depth.rs`) works
    on core types only — that is why the live-roster helper it needed returns
-   `Vec<AgentEntry>` rather than exposing herdr's `call`.
+   `Vec<AgentEntry>` rather than exposing herdr's `call`. The same rule holds for
+   model providers: `backend.rs` is the port, every request/response key lives in
+   `backend_gemini.rs` or `backend_text.rs`, and `brain.rs` names no provider.
 3. New agent source = one Rust module normalizing into core events + one
    registration line in `lib.rs`. Nothing else changes.
 
@@ -237,10 +273,15 @@ creates/removes `~/.config/sumvox/muted`.
 
 Live (`#[ignore]`) tests need a provider key and run against the real herdr /
 provider: `ANTHROPIC_API_KEY=… cargo test sap9_live -- --ignored --nocapture`.
-They relocate the config root to a temp dir, so they no longer touch your real
-`memory.jsonl` — the key **file** is carried over, so `~/.config/shikigami/`
-keys keep working too. `cargo test` alone can never prove live behaviour; that
-is exactly how R-observe's "the brain invents a source" defect got through.
+The tool loop has its own, and it needs herdr up with at least one live agent:
+`GEMINI_API_KEY=… cargo test gemini_live -- --ignored --nocapture` — it prints the
+whole turn, so you can read whether step 1 really returned a `functionCall` and
+step 2 really answered from the pane. They relocate the config root to a temp dir,
+so they no longer touch your real `memory.jsonl` — the key **file** is carried
+over, so `~/.config/shikigami/` keys keep working too. `cargo test` alone can
+never prove live behaviour; that is exactly how R-observe's "the brain invents a
+source" defect got through, **and the same defect grew back in the tool loop** as
+a failed pane read counting as consulted — offline tests were green for it.
 
 ## Roadmap (R-series, 2026-07-23 — supersedes old M2–M4 numbering)
 
@@ -278,14 +319,22 @@ speak to N, then breadth. Avatar/Linux are off the critical path.
   never bulk-injected. Storage is format-stable across the still-open loop
   question, which is why this shipped without it. Ticket
   `r-brain-durable-memory`; follow-ups in `memory-read-and-durability-polish`.
-- **R-tool-loop — the loop that makes it an agent** (2026-08-16): today's brain
-  is single-shot with a hand-parsed JSON action and **no `tools` field at all**;
-  context is assembled for it, not by it. Add a real tool-use loop behind one
-  backend interface (provider formats stay in adapters), gemini first, then
-  grok → openai → anthropic. Brings `recall` (the fact layer's reader),
-  `read_pane` (moving depth from prefetch to on-demand, so the fast path stops
-  paying for it), and `memory` (model-written curated tier, guarded by a
-  must-cite-a-source rule). Ticket `r-brain-tool-loop`.
+- **R-tool-loop — the loop that makes it an agent** — **increment 1 DONE
+  2026-08-17**, split into four at the interface boundary (a human call: 11
+  criteria over 5 files was too much for one review). Shipped: the `Backend` port
+  + two adapters, the 5-step/45s loop, gemini native function calling, Speak/Summon
+  as tools with Summon loop-terminal, and a thin `read_pane` — pulled into
+  increment 1 because a loop whose only tools are terminal can never take a second
+  step, so criterion 4 would have had no real receipt. Still open: **increment 2**
+  `read_pane` off the prefetch path + budget constants in one place + the
+  no-write-back test; **increment 3** `recall` + the `memory` curated writer and
+  its four guardrails; **increment 4** `/context`. Two findings worth keeping:
+  `thinkingBudget: 0` does **not** break gemini-2.5-flash function calling
+  (live-verified — no offline test could have said either way), and **R-observe's
+  invented-source defect grew back in the new code** as "a failed pane read still
+  counted as consulted", caught only by a post-hoc review pass, which is the second
+  time this brain has had to be stopped from naming a source it never had. Ticket
+  `r-brain-tool-loop`.
 - **R-event-driven — it wakes on the world, not only on you** (2026-08-16):
   hooks events reach the brain's judgement, with a silence-by-default rule and a
   heartbeat timer **inside the existing Tauri process** — no gateway daemon;

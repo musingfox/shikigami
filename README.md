@@ -14,7 +14,7 @@ app is the interface you summon them from.
 
 ```
 ① observe   agent event ─▶ avatar reaction + spoken report      (done)
-② command   you speak ─▶ STT ─▶ brain ─▶ act ─▶ speak back      (next)
+② command   you speak ─▶ STT ─▶ brain ─▶ act ─▶ speak back      (done)
 
 shikigami — floating avatar (Tauri 2)
    ├─ mouth : SumVox            (summarize + TTS)              → ../SumVox
@@ -30,5 +30,7 @@ bun run tauri dev        # floating avatar + tray + Cmd+Ctrl+S toggle
 scripts/demo.sh "hello"  # fire a fake notification: toast + lip-sync
 ```
 
-Status: **M0 + M1 done** (observe channel, fed by SumVox's Claude Code hook).
+Status: **R0–R2, R-observe, R-memory done**, plus the tool-use loop
+(`R-tool-loop` increment 1) — both channels closed, memory survives a restart,
+and the brain can look something up before it answers.
 Architecture: `ARCHITECTURE.md`. Context for agents: `CLAUDE.md`.
