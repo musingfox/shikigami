@@ -226,8 +226,9 @@ fn append_row_in(dir: &Path, row: &str, cap: u64) -> Result<(), String> {
         .append(true)
         .open(current)
         .map_err(|e| e.to_string())?;
-    file.write_all(row.as_bytes())
-        .and_then(|_| file.write_all(b"\n"))
+    // Row and terminator in one write: a process that dies mid-append must not
+    // leave a line the next append would concatenate onto (both turns unparsable).
+    file.write_all(format!("{row}\n").as_bytes())
         .map_err(|e| e.to_string())
 }
 
@@ -298,6 +299,22 @@ mod tests {
         let rows = std::fs::read_to_string(concurrent.0.join("memory.jsonl")).unwrap();
         assert_eq!(rows.lines().count(), 8);
         assert!(rows.lines().all(|row| row == "same-width"));
+    }
+
+    #[test]
+    fn memory_append_never_leaves_the_file_mid_line() {
+        let tmp = Tmp::new();
+        let path = tmp.0.join("memory.jsonl");
+        append_row_in(&tmp.0, turn_rows(1..=1).trim_end(), ROTATE_MAX_BYTES).unwrap();
+        // the terminator lands with its row, never as a second write
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with('\n'));
+
+        append_row_in(&tmp.0, turn_rows(2..=2).trim_end(), ROTATE_MAX_BYTES).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with('\n'));
+        assert_eq!(
+            history_snapshot_in(&tmp.0),
+            vec![("q1".into(), "a1".into()), ("q2".into(), "a2".into())]
+        );
     }
 
     #[test]
