@@ -48,6 +48,60 @@ fn turn_rows_in(path: &Path) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// One row of the memory file, whichever layer wrote it, with its own timestamp
+/// kept. `history_snapshot_in` deliberately drops both the ts and every fact row
+/// — it feeds the rolling layer. This reader is the other half: it keeps every
+/// verb and every ts, because a ts is the only handle a later turn has on "which
+/// record was this". Fields the row did not carry stay `None`; a fact row has no
+/// `user`/`assistant`, a turn row has no `pane`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemoryRow {
+    pub ts: String,
+    pub verb: String,
+    pub text: String,
+    pub pane: Option<String>,
+    pub agent: Option<String>,
+    pub project: Option<String>,
+    pub user: Option<String>,
+    pub assistant: Option<String>,
+}
+
+/// Every row still on disk, oldest generation first. Never fails: a missing file,
+/// an unreadable one, or a line that is not JSON contributes nothing and the rest
+/// still comes back. Reads both generations, because rotation would otherwise
+/// make everything written before it silently unrememberable.
+pub(crate) fn memory_rows_in(dir: &Path) -> Vec<MemoryRow> {
+    let mut rows = memory_rows_of(&dir.join("memory.jsonl.1"));
+    rows.append(&mut memory_rows_of(&dir.join("memory.jsonl")));
+    rows
+}
+
+fn memory_rows_of(path: &Path) -> Vec<MemoryRow> {
+    fs::read_to_string(path)
+        .map(|text| text.lines().filter_map(parse_row).collect())
+        .unwrap_or_default()
+}
+
+fn parse_row(line: &str) -> Option<MemoryRow> {
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let field = |key: &str| {
+        value[key]
+            .as_str()
+            .map(str::to_string)
+            .filter(|text| !text.is_empty())
+    };
+    Some(MemoryRow {
+        ts: field("ts")?,
+        verb: field("verb")?,
+        text: field("text").unwrap_or_default(),
+        pane: field("pane"),
+        agent: field("agent"),
+        project: field("project"),
+        user: field("user"),
+        assistant: field("assistant"),
+    })
+}
+
 static APPEND_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Serialize)]
@@ -260,6 +314,76 @@ mod tests {
         }
     }
 
+
+    // MemoryRowReader — the fact layer finally has a reader, and it reads both
+    // generations: a row that survived rotation is still a row.
+    #[test]
+    fn every_row_of_both_generations_comes_back_oldest_first() {
+        let tmp = Tmp::new();
+        std::fs::write(
+            tmp.0.join("memory.jsonl.1"),
+            "{\"ts\":\"A\",\"verb\":\"inject\",\"pane\":\"%1\",\"text\":\"跑測試\",\"agent\":\"cyris\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.0.join("memory.jsonl"),
+            "{\"ts\":\"B\",\"verb\":\"turn\",\"user\":\"u\",\"assistant\":\"a\"}\n",
+        )
+        .unwrap();
+
+        let rows = memory_rows_in(&tmp.0);
+        assert_eq!(
+            rows.iter().map(|row| row.ts.as_str()).collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        assert_eq!(rows[1].user.as_deref(), Some("u"));
+        assert_eq!(rows[1].assistant.as_deref(), Some("a"));
+        assert_eq!(rows[1].pane, None);
+    }
+
+    #[test]
+    fn a_broken_line_is_skipped_and_the_rest_of_the_file_still_reads() {
+        let tmp = Tmp::new();
+        std::fs::write(
+            tmp.0.join("memory.jsonl"),
+            "{\"ts\":\"A\",\"verb\":\"turn\",\"user\":\"u\",\"assistant\":\"a\"}\n\
+             壞掉的一行\n\
+             {\"ts\":\"B\",\"verb\":\"summon\",\"pane\":\"%9\",\"text\":\"跑測試\",\"project\":\"cyris\"}\n",
+        )
+        .unwrap();
+        let rows = memory_rows_in(&tmp.0);
+        assert_eq!(
+            rows.iter().map(|row| row.ts.as_str()).collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        assert_eq!(rows[1].project.as_deref(), Some("cyris"));
+    }
+
+    #[test]
+    fn no_memory_file_at_all_is_no_rows_not_a_panic() {
+        let tmp = Tmp::new();
+        assert!(memory_rows_in(&tmp.0).is_empty());
+        assert!(memory_rows_in(&tmp.0.join("missing")).is_empty());
+    }
+
+    #[test]
+    fn a_fact_row_keeps_its_timestamp_and_its_absent_fields_stay_absent() {
+        let tmp = Tmp::new();
+        std::fs::write(
+            tmp.0.join("memory.jsonl"),
+            "{\"ts\":\"A\",\"verb\":\"inject\",\"pane\":\"%1\",\"text\":\"跑測試\",\"agent\":\"cyris\"}\n",
+        )
+        .unwrap();
+        let rows = memory_rows_in(&tmp.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ts, "A");
+        assert_eq!(rows[0].verb, "inject");
+        assert_eq!(rows[0].text, "跑測試");
+        assert_eq!(rows[0].agent.as_deref(), Some("cyris"));
+        assert_eq!(rows[0].pane.as_deref(), Some("%1"));
+        assert_eq!(rows[0].project, None);
+        assert_eq!(rows[0].user, None);
+    }
 
     #[test]
     fn action_row_encodes_known_fields_and_omits_unknowns() {
