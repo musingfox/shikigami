@@ -228,8 +228,12 @@ The fast path stops paying (increment 2, 2026-08-17):
 - Known gap, **not** caused here: `dai_live`'s "no source → must say 不知道" assertion
   is flaky against the live model (~1 in 5). That path declares no tools and its
   request builder is key-for-key identical to `404f40c`'s, so nothing here caused
-  it: R-observe's central invariant is *unlikely* rather than *closed* — worth its
-  own ticket
+  it: R-observe's central invariant is *unlikely* rather than *closed*. Ticket
+  `brain-no-source-invariant-flaky` — and note what it turns conditional: the fact
+  layer is machine-written and increment 3's `memory` guardrail refuses a sourceless
+  write **because R-observe proved this brain invents sources**. That guardrail is
+  only as good as this invariant, so until the ticket has numbers, treat it as
+  *probably* effective
 
 ## Architecture
 
