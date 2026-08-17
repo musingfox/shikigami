@@ -90,6 +90,11 @@ pub fn shortcut_action(is_ptt: bool, state: ShortcutState, listening: bool) -> V
     }
 }
 
+pub fn transcribe_bytes(pcm: Vec<u8>, vocab: &[String]) -> Result<String, String> {
+    let f = crate::stt::pcm_bytes_to_f32(&pcm)?;
+    crate::stt::transcribe(&f, vocab)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,9 +274,4 @@ mod tests {
         };
         assert!(!reply.trim().is_empty());
     }
-}
-
-pub fn transcribe_bytes(pcm: Vec<u8>, vocab: &[String]) -> Result<String, String> {
-    let f = crate::stt::pcm_bytes_to_f32(&pcm)?;
-    crate::stt::transcribe(&f, vocab)
 }
