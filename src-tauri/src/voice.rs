@@ -184,16 +184,32 @@ mod tests {
         // binary never runs the polling thread, so it would always be empty and
         // this receipt would never be collectable.
         let roster = crate::herdr::fetch_roster_now().expect("live herdr agent.list");
+        // Same reason, for the other half: HOOK_DEPTHS is filled by the spool
+        // tailer, which this binary never starts, so read the real spool here.
+        // Until the screen prefetch was removed this test could pass on the screen
+        // half alone — which is exactly why R-observe's hook half had no receipt.
+        // Now the join can only be proven by a hook line, so this is that receipt.
+        let spool = std::fs::read_to_string(crate::cchooks::spool_path())
+            .expect("live test needs the real hooks.ndjson spool");
+        for line in spool.lines() {
+            crate::cchooks::record_depth(line);
+        }
+        let depth = crate::depth::collect(&roster);
         let observed = roster
             .iter()
-            .find(|agent| matches!(agent.status.as_str(), "blocked" | "working"))
-            .expect("live test needs one blocked or working agent");
-        let depth = crate::depth::collect(&roster);
+            .find(|agent| {
+                depth.iter().any(|item| item.pane == agent.pane)
+                    && matches!(agent.status.as_str(), "blocked" | "working")
+            })
+            .expect("live test needs one blocked or working agent carrying a hook line");
         let matched = depth
             .iter()
             .find(|item| item.pane == observed.pane)
             .expect("live depth must join by the exact herdr pane_id");
-        assert!(matched.precise.is_some() || matched.screen.is_some());
+        // The hook half, on its own: herdr's pane_id really is the hook's
+        // HERDR_PANE_ID, with no screen excerpt propping the join up.
+        assert!(matched.precise.is_some());
+        assert!(matched.screen.is_none());
 
         let prompt = crate::brain::system_prompt(&roster, &depth, None, &[]);
         println!(
