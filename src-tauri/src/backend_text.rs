@@ -200,7 +200,7 @@ mod tests {
         transcript: &str,
     ) -> TurnStart {
         TurnStart {
-            system: crate::brain::system_prompt(roster, depth, None),
+            system: crate::brain::system_prompt(roster, depth, None, &[]),
             history: history.to_vec(),
             transcript: transcript.to_string(),
         }

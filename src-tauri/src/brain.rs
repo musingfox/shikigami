@@ -1,21 +1,33 @@
-// Brain: transcript -> short spoken reply, via Gemini / OpenAI / Anthropic.
-// Provider picked by SHIKIGAMI_BRAIN env override, else first provider with a
-// key available, cheapest first (gemini -> openai -> anthropic).
-// Client shape (no_proxy + timeout) copied from SumVox — macOS CoreFoundation workaround.
-// ponytail: requests/responses are serde_json::Value, no typed structs per vendor.
+// Brain: transcript -> one decided outcome (speech, or a summon proposal), via a
+// multi-step tool-use loop. One utterance costs up to MAX_STEPS model calls
+// inside TURN_BUDGET; between steps the loop runs whatever tools the model asked
+// for and hands the answers back, so it can reply from what it just read instead
+// of from what it guessed. Which model answers, and what its wire looks like, is
+// the backend port's business (backend.rs plus its two adapters) — nothing in
+// this file names a provider.
 
 use std::path::Path;
 use std::time::Duration;
 
-use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use crate::backend::Provider;
+use crate::backend::{Backend, StepAction, ToolResult, ToolSpec, TurnStart};
 use crate::depth::{AgentDepth, PreciseDepth};
 use crate::events::AgentEntry;
+use crate::tools::Tools;
 
 const SYSTEM_PROMPT: &str = "你是式神，使用者的桌面語音助理。用使用者說話的語言簡潔回答，最多兩句，純文字、不用 Markdown，內容要適合直接朗讀。直接給答案，不要輸出思考過程、前言或自我說明。";
-const MAX_TOKENS: u32 = 300;
+
+/// How many model calls one utterance may cost.
+pub(crate) const MAX_STEPS: usize = 5;
+
+/// Wall clock for the whole turn. Checked before every model step and before
+/// every tool call, and handed to the backend so the per-request HTTP timeout is
+/// a function of what is left rather than a constant that could outlive the loop.
+pub(crate) const TURN_BUDGET: Duration = Duration::from_secs(45);
+
+const OUT_OF_STEPS: &str = "步數上限";
+const TIMED_OUT: &str = "時間上限";
 
 // Appended to the system prompt so a "go open project X and do Y" request comes
 // back machine-readable instead of as a verbal promise. The JSON is written
@@ -24,9 +36,9 @@ const SUMMON_INSTRUCTION: &str = "使用者若要求在某個專案開一個新�
 
 // Persistent short multi-turn memory: the most recent successful
 // (user, assistant) pairs, provider-neutral and restored across restarts.
-fn commit_in(dir: &Path, user: &str, result: &Result<String, String>) {
-    let Ok(assistant) = result else { return };
-    let assistant = history_text(&parse_action(assistant));
+fn commit_in(dir: &Path, user: &str, result: &Result<SummonAction, String>) {
+    let Ok(action) = result else { return };
+    let assistant = history_text(action);
     let unix_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -67,7 +79,7 @@ fn strip_fence(s: &str) -> &str {
 /// non-empty project and task becomes a Summon; everything else — prose, broken
 /// JSON, unknown actions, missing fields — is spoken as-is. Speak text is
 /// trimmed, so a model's trailing newline never reaches history.log or TTS.
-pub fn parse_action(reply: &str) -> SummonAction {
+pub(crate) fn parse_action(reply: &str) -> SummonAction {
     let speak = || SummonAction::Speak(reply.trim().to_string());
     let Ok(v) = serde_json::from_str::<Value>(strip_fence(reply.trim())) else {
         return speak();
@@ -165,7 +177,18 @@ pub(crate) fn system_prompt(
     roster: &[AgentEntry],
     depth: &[AgentDepth],
     curated: Option<&str>,
+    tools: &[ToolSpec],
 ) -> String {
+    // Answer rule (3) as shipped forbids looking any further — so a declared
+    // read_pane would ship dead unless the rule says to use it first. The clause
+    // precedes the 不知道 fallback rather than replacing it: with no tool, or
+    // with a tool that finds nothing, the honest 不知道 still applies. An empty
+    // tool list leaves this empty, so the prompt is byte-identical to today's.
+    let tool_clause = if tools.iter().any(|spec| spec.name == "read_pane") {
+        "你有 read_pane 這個工具，先用它讀那個 agent 的畫面：讀到內容就依畫面回答，並逐字說出「從畫面看到」。只有在 read_pane 也讀不到內容時，才照下面這條回答——"
+    } else {
+        ""
+    };
     // The user's own handwritten notes, so no observation fence: they are as
     // trustworthy as the app's own settings. Placed after the persona and
     // before the roster — long-term background first, live state second. An
@@ -175,128 +198,169 @@ pub(crate) fn system_prompt(
         .map(|text| format!("長期記憶（使用者手寫，內容可信）：\n{text}\n\n"))
         .unwrap_or_default();
     format!(
-        "{}\n\n{}{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。被問到某個 agent「卡在什麼」「在忙什麼」時，先在名冊裡看那個 agent 底下有沒有「精確訊號」和「畫面節錄」這兩行，再從下面三條擇一，只套用選中的那一條：\n(1) 有「精確訊號」那一行：用一句口語轉述精確訊號說的那件事，保留它原本的關鍵詞（英文關鍵詞照原樣留著），不要改寫成同義詞，也不要把標籤名或「精確訊號」四個字唸出來。\n(2) 沒有精確訊號、有「畫面節錄」那一行：依畫面節錄的內容回答，並逐字說出「從畫面看到」。\n(3) 兩行都沒有：這時你手上只有狀態詞，回答必須以「不知道」這三個字開頭，例如「不知道它卡在什麼，只知道它現在是 blocked」；不得給任何原因，不得出現「畫面」或「看到」——名冊表頭寫的「herdr 從終端機畫面推測」只是狀態詞的來歷，不是畫面節錄，不能拿來回答。\n使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
+        "{}\n\n{}{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。被問到某個 agent「卡在什麼」「在忙什麼」時，先在名冊裡看那個 agent 底下有沒有「精確訊號」和「畫面節錄」這兩行，再從下面三條擇一，只套用選中的那一條：\n(1) 有「精確訊號」那一行：用一句口語轉述精確訊號說的那件事，保留它原本的關鍵詞（英文關鍵詞照原樣留著），不要改寫成同義詞，也不要把標籤名或「精確訊號」四個字唸出來。\n(2) 沒有精確訊號、有「畫面節錄」那一行：依畫面節錄的內容回答，並逐字說出「從畫面看到」。\n(3) 兩行都沒有：{}這時你手上只有狀態詞，回答必須以「不知道」這三個字開頭，例如「不知道它卡在什麼，只知道它現在是 blocked」；不得給任何原因，不得出現「畫面」或「看到」——名冊表頭寫的「herdr 從終端機畫面推測」只是狀態詞的來歷，不是畫面節錄，不能拿來回答。\n使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
         SYSTEM_PROMPT,
         memory,
         render_roster(roster, depth),
+        tool_clause,
         SUMMON_INSTRUCTION
     )
 }
 
-/// Prior turns + the current question as strict user/assistant alternating
-/// messages ({role, content}) — the Anthropic/OpenAI wire shape. The current
-/// question is always the final `user` message.
-fn chat_messages(history: &[(String, String)], transcript: &str) -> Vec<Value> {
-    let mut msgs = Vec::with_capacity(history.len() * 2 + 1);
-    for (u, a) in history {
-        msgs.push(json!({ "role": "user", "content": u }));
-        msgs.push(json!({ "role": "assistant", "content": a }));
-    }
-    msgs.push(json!({ "role": "user", "content": transcript }));
-    msgs
+/// What the loop does with one step's worth of actions. A summon outranks
+/// everything else in the step: it is loop-terminal, so nothing else in the same
+/// step can still be worth running.
+enum Decision {
+    Summon { project: String, task: String },
+    Run { calls: Vec<StepAction>, interim: Option<String> },
+    Speak(String),
 }
 
-/// Prior turns + the current question as Gemini `contents` — parts[].text with
-/// an explicit role ("user"/"model") on every entry, single-turn included.
-fn gemini_contents(history: &[(String, String)], transcript: &str) -> Vec<Value> {
-    let mut contents = Vec::with_capacity(history.len() * 2 + 1);
-    for (u, a) in history {
-        contents.push(json!({ "role": "user", "parts": [{ "text": u }] }));
-        contents.push(json!({ "role": "model", "parts": [{ "text": a }] }));
-    }
-    contents.push(json!({ "role": "user", "parts": [{ "text": transcript }] }));
-    contents
-}
-
-fn build_request(
-    provider: Provider,
-    transcript: &str,
-    roster: &[AgentEntry],
-    depth: &[AgentDepth],
-    history: &[(String, String)],
-    curated: Option<&str>,
-) -> Value {
-    let system = system_prompt(roster, depth, curated);
-    match provider {
-        Provider::Gemini => json!({
-            "system_instruction": { "parts": [{ "text": system }] },
-            "contents": gemini_contents(history, transcript),
-            "generationConfig": {
-                "maxOutputTokens": MAX_TOKENS,
-                // 2.5-flash thinks by default AND thinking tokens eat
-                // maxOutputTokens — a spoken reply needs neither
-                "thinkingConfig": { "thinkingBudget": 0 },
-            },
-        }),
-        Provider::OpenAi => {
-            let mut messages = vec![json!({ "role": "system", "content": system })];
-            messages.extend(chat_messages(history, transcript));
-            json!({
-                "model": provider.model(),
-                "max_completion_tokens": MAX_TOKENS,
-                "messages": messages,
-            })
+fn decide(actions: &[StepAction]) -> Decision {
+    for action in actions {
+        if let StepAction::Summon { project, task } = action {
+            return Decision::Summon {
+                project: project.clone(),
+                task: task.clone(),
+            };
         }
-        Provider::Anthropic => json!({
-            "model": provider.model(),
-            "max_tokens": MAX_TOKENS,
-            "system": system,
-            "messages": chat_messages(history, transcript),
-        }),
+    }
+    let said: String = actions
+        .iter()
+        .filter_map(|action| match action {
+            StepAction::Speak(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let calls: Vec<StepAction> = actions
+        .iter()
+        .filter(|action| {
+            matches!(
+                action,
+                StepAction::ReadPane { .. } | StepAction::Rejected { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    if calls.is_empty() {
+        return Decision::Speak(said);
+    }
+    Decision::Run {
+        calls,
+        interim: (!said.trim().is_empty()).then_some(said),
     }
 }
 
-fn extract_reply(provider: Provider, v: &Value) -> Result<String, String> {
-    let text: String = match provider {
-        Provider::Gemini => v["candidates"][0]["content"]["parts"]
-            .as_array()
-            .map(|parts| {
-                parts
-                    .iter()
-                    .filter(|p| p["thought"] != true) // skip thought-summary parts
-                    .filter_map(|p| p["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default(),
-        Provider::OpenAi => v["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        Provider::Anthropic => v["content"]
-            .as_array()
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| b["type"] == "text")
-                    .filter_map(|b| b["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default(),
+/// The honest ending when the loop runs out of room: which sources it consulted,
+/// whatever it has so far, and that there is no conclusion yet. Exhaustion is an
+/// answer — never silence, never an invented one.
+fn exhausted_message(reason: &str, consulted: &[String], found: Option<&str>) -> String {
+    let so_far = match found {
+        Some(text) if !text.trim().is_empty() => format!("到目前為止：{}。", text.trim()),
+        _ => String::new(),
     };
-    if text.trim().is_empty() {
-        return Err(format!("empty reply from brain ({})", provider.name()));
-    }
-    Ok(text)
+    let looked = if consulted.is_empty() {
+        "我還沒查到任何東西".to_string()
+    } else {
+        format!("我查了 {}", consulted.join("、"))
+    };
+    format!("{so_far}{looked}，但到了{reason}，還沒有結論，要我繼續查嗎？")
 }
 
-fn http_client() -> Client {
-    Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|_| Client::new())
+/// One utterance: ask, run whatever tools were asked for, ask again with the
+/// answers in hand, until the model says something or the room runs out.
+///
+/// A step's tool results go back whole or not at all — a follow-up request
+/// carrying an unanswered call is a wire error on every provider that has calls,
+/// so when the deadline lapses mid-step the turn ends instead of sending half.
+/// `remaining` is injected rather than read from a clock so the bounds are
+/// testable without waiting 45 seconds.
+pub(crate) async fn run_turn_with<B, T, C>(
+    backend: &mut B,
+    turn: &TurnStart,
+    tools: &T,
+    remaining: C,
+    max_steps: usize,
+) -> Result<SummonAction, String>
+where
+    B: Backend,
+    T: Tools,
+    C: Fn() -> Duration,
+{
+    let mut results: Vec<ToolResult> = Vec::new();
+    let mut consulted: Vec<String> = Vec::new();
+    let mut found: Option<String> = None;
+    for _ in 0..max_steps {
+        let budget = remaining();
+        if budget.is_zero() {
+            return Ok(SummonAction::Speak(exhausted_message(
+                TIMED_OUT,
+                &consulted,
+                found.as_deref(),
+            )));
+        }
+        let actions = backend.step(turn, &results, budget).await?;
+        results = Vec::new();
+        match decide(&actions) {
+            Decision::Summon { project, task } => {
+                return Ok(SummonAction::Summon { project, task })
+            }
+            Decision::Speak(text) if !text.trim().is_empty() => {
+                return Ok(SummonAction::Speak(text))
+            }
+            Decision::Speak(_) => {
+                return Err(format!("empty reply from brain ({})", backend.name()))
+            }
+            Decision::Run { calls, interim } => {
+                if interim.is_some() {
+                    found = interim;
+                }
+                for call in calls {
+                    if remaining().is_zero() {
+                        return Ok(SummonAction::Speak(exhausted_message(
+                            TIMED_OUT,
+                            &consulted,
+                            found.as_deref(),
+                        )));
+                    }
+                    match call {
+                        StepAction::ReadPane { call, agent } => {
+                            let text = tools.read_pane(&agent).await;
+                            let label = format!("{agent} 的畫面");
+                            if !consulted.contains(&label) {
+                                consulted.push(label);
+                            }
+                            results.push(ToolResult { call, text });
+                        }
+                        // A tool we cannot run answers with its own reason, so the
+                        // model can correct itself inside the step budget instead
+                        // of the turn failing.
+                        StepAction::Rejected { call, reason } => {
+                            results.push(ToolResult { call, text: reason })
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(SummonAction::Speak(exhausted_message(
+        OUT_OF_STEPS,
+        &consulted,
+        found.as_deref(),
+    )))
 }
 
 pub async fn ask(
     transcript: &str,
     roster: &[AgentEntry],
     depth: &[AgentDepth],
-) -> Result<String, String> {
+) -> Result<SummonAction, String> {
     // Snapshot prior turns BEFORE the call; commit this turn AFTER it resolves.
     // The current question never leaks into the history it is sent with, and a
-    // failed turn (any path) leaves no disk row.
+    // failed turn (any path) leaves no disk row. One utterance leaves exactly one
+    // row however many steps it took — tool results live only for this turn.
     let dir = crate::config::config_dir();
     let history = history_snapshot_in(&dir);
     let result = ask_once(transcript, roster, depth, &history).await;
@@ -309,92 +373,32 @@ async fn ask_once(
     roster: &[AgentEntry],
     depth: &[AgentDepth],
     history: &[(String, String)],
-) -> Result<String, String> {
-    let (provider, key) = crate::backend::detect_provider()?;
+) -> Result<SummonAction, String> {
+    let mut backend = crate::backend::detect()?;
     let curated = crate::memory::curated_in(&crate::config::config_dir());
-    let req = build_request(
-        provider,
-        transcript,
-        roster,
-        depth,
-        history,
-        curated.as_deref(),
-    );
-    let mut request = match provider {
-        Provider::Gemini => http_client()
-            .post(format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-                provider.model()
-            ))
-            .header("x-goog-api-key", &key),
-        Provider::OpenAi => http_client()
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("authorization", format!("Bearer {}", key)),
-        Provider::Anthropic => http_client()
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &key)
-            .header("anthropic-version", "2023-06-01"),
+    let turn = TurnStart {
+        // The prompt only ever advertises tools this backend can actually call.
+        system: system_prompt(roster, depth, curated.as_deref(), &backend.tools()),
+        history: history.to_vec(),
+        transcript: transcript.to_string(),
     };
-    request = request.header("content-type", "application/json");
-
-    let response = request
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| format!("brain request failed: {}", e))?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("brain read body: {}", e))?;
-
-    if !status.is_success() {
-        return Err(format!("{} API {}: {}", provider.name(), status, body));
-    }
-
-    let parsed: Value =
-        serde_json::from_str(&body).map_err(|e| format!("brain parse: {} body={}", e, body))?;
-
-    extract_reply(provider, &parsed)
+    let tools = crate::tools::LiveTools {
+        roster: roster.to_vec(),
+    };
+    let started = std::time::Instant::now();
+    run_turn_with(
+        &mut backend,
+        &turn,
+        &tools,
+        move || TURN_BUDGET.saturating_sub(started.elapsed()),
+        MAX_STEPS,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // BrainReply contract tests (request/response per provider)
-    #[test]
-    fn t1_anthropic_request_shape() {
-        let v = build_request(Provider::Anthropic, "hi", &[], &[], &[], None);
-        assert_eq!(v["model"], "claude-haiku-4-5");
-        assert_eq!(v["max_tokens"], 300);
-        assert_eq!(v["messages"][0]["role"], "user");
-        assert_eq!(v["messages"][0]["content"], "hi");
-        assert!(!v["system"].as_str().unwrap().is_empty());
-    }
-
-    #[test]
-    fn t1b_gemini_request_shape() {
-        let v = build_request(Provider::Gemini, "hi", &[], &[], &[], None);
-        assert_eq!(v["contents"][0]["parts"][0]["text"], "hi");
-        assert!(!v["system_instruction"]["parts"][0]["text"]
-            .as_str()
-            .unwrap()
-            .is_empty());
-        assert_eq!(v["generationConfig"]["maxOutputTokens"], 300);
-        assert_eq!(v["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0);
-    }
-
-    #[test]
-    fn t1c_openai_request_shape() {
-        let v = build_request(Provider::OpenAi, "hi", &[], &[], &[], None);
-        assert_eq!(v["model"], "gpt-4.1-mini");
-        assert_eq!(v["max_completion_tokens"], 300);
-        assert_eq!(v["messages"][0]["role"], "system");
-        assert_eq!(v["messages"][1]["role"], "user");
-        assert_eq!(v["messages"][1]["content"], "hi");
-    }
 
     // Roster test fixtures
     fn agent(name: &str, status: &str, title: &str, cwd: &str) -> AgentEntry {
@@ -444,19 +448,19 @@ mod tests {
 
     #[test]
     fn rp5_system_prompt_instructs_stt_fuzzy_match() {
-        let out = system_prompt(&[], &[], None);
+        let out = system_prompt(&[], &[], None, &[]);
         assert!(out.contains("語音辨識"));
         assert!(out.contains("相近"));
     }
 
     #[test]
     fn absent_curated_memory_leaves_prompt_unchanged() {
-        assert!(!system_prompt(&[], &[], None).contains("長期記憶"));
+        assert!(!system_prompt(&[], &[], None, &[]).contains("長期記憶"));
     }
 
     #[test]
     fn curated_memory_precedes_live_roster_in_prompt() {
-        let out = system_prompt(&[], &[], Some("Nick 偏好簡短回答"));
+        let out = system_prompt(&[], &[], Some("Nick 偏好簡短回答"), &[]);
         let memory = out.find("長期記憶").unwrap();
         let roster = out.find("目前沒有觀測到 agent。").unwrap();
         assert!(memory < roster);
@@ -565,126 +569,6 @@ mod tests {
         assert!(out.lines().all(|line| !line.starts_with("- ") || !line.contains("觀測輸出")));
     }
 
-    #[test]
-    fn adpb_t5_request_carries_depth_in_system_only() {
-        let v = build_request(
-            Provider::Anthropic,
-            "hi",
-            &[agent("builder", "blocked", "", "")],
-            &[AgentDepth {
-                pane: "%1".into(),
-                precise: Some(PreciseDepth {
-                    label: "permission_prompt".into(),
-                    detail: "Claude needs your permission".into(),
-                }),
-                screen: None,
-            }],
-            &[],
-            None,
-        );
-        assert!(v["system"].as_str().unwrap().contains("Claude needs your permission"));
-        assert_eq!(v["messages"][0]["content"], "hi");
-    }
-
-    // BrainRequestCarriesRoster contract
-    #[test]
-    fn brc1_anthropic_system_carries_roster_user_clean() {
-        let v = build_request(Provider::Anthropic, "hi", &[agent("builder", "working", "", "")], &[], &[], None);
-        let sys = v["system"].as_str().unwrap();
-        assert!(sys.contains("builder"));
-        assert!(sys.contains("working"));
-        assert_eq!(v["messages"][0]["content"], "hi");
-    }
-
-    #[test]
-    fn brc2_gemini_system_carries_roster_user_clean() {
-        let v = build_request(Provider::Gemini, "hi", &[agent("builder", "working", "", "")], &[], &[], None);
-        let sys = v["system_instruction"]["parts"][0]["text"].as_str().unwrap();
-        assert!(sys.contains("builder"));
-        assert_eq!(v["contents"][0]["parts"][0]["text"], "hi");
-    }
-
-    #[test]
-    fn brc3_openai_system_carries_roster_user_clean() {
-        let v = build_request(Provider::OpenAi, "hi", &[agent("builder", "working", "", "")], &[], &[], None);
-        assert_eq!(v["messages"][0]["role"], "system");
-        let sys = v["messages"][0]["content"].as_str().unwrap();
-        assert!(sys.contains("builder"));
-        assert_eq!(v["messages"][1]["content"], "hi");
-    }
-
-    #[test]
-    fn brc4_empty_roster_says_no_observation() {
-        let v = build_request(Provider::Anthropic, "hi", &[], &[], &[], None);
-        assert!(v["system"].as_str().unwrap().contains("沒有觀測到"));
-    }
-
-    #[test]
-    fn t2_extract_anthropic_text() {
-        let v: Value = serde_json::from_str(
-            r#"{"content":[{"type":"text","text":"你好"}],"model":"m","usage":{"input_tokens":1,"output_tokens":1}}"#,
-        )
-        .unwrap();
-        assert_eq!(extract_reply(Provider::Anthropic, &v).unwrap(), "你好");
-    }
-
-    #[test]
-    fn t2b_extract_gemini_text() {
-        let v: Value = serde_json::from_str(
-            r#"{"candidates":[{"content":{"parts":[{"text":"你"},{"text":"好"}],"role":"model"},"finishReason":"STOP"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(extract_reply(Provider::Gemini, &v).unwrap(), "你好");
-    }
-
-    #[test]
-    fn t2c_extract_openai_text() {
-        let v: Value = serde_json::from_str(
-            r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"你好"},"finish_reason":"stop"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(extract_reply(Provider::OpenAi, &v).unwrap(), "你好");
-    }
-
-    #[test]
-    fn t2d_extract_gemini_skips_thought_parts() {
-        let v: Value = serde_json::from_str(
-            r#"{"candidates":[{"content":{"parts":[
-                {"text":"讓我想想…","thought":true},
-                {"text":"天空是藍色的因為瑞利散射。"}
-            ],"role":"model"}}]}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            extract_reply(Provider::Gemini, &v).unwrap(),
-            "天空是藍色的因為瑞利散射。"
-        );
-    }
-
-    #[test]
-    fn t3_extract_anthropic_skips_thinking_and_joins_text() {
-        let v: Value = serde_json::from_str(
-            r#"{"content":[
-                {"type":"thinking","thinking":"ignored"},
-                {"type":"text","text":"a"},
-                {"type":"text","text":"b"}
-            ]}"#,
-        )
-        .unwrap();
-        assert_eq!(extract_reply(Provider::Anthropic, &v).unwrap(), "ab");
-    }
-
-    #[test]
-    fn t4_extract_empty_content_err_names_provider() {
-        let v: Value = serde_json::from_str(r#"{"content":[]}"#).unwrap();
-        let err = extract_reply(Provider::Anthropic, &v).unwrap_err();
-        assert!(err.contains("empty"));
-        let v: Value = serde_json::from_str(r#"{"candidates":[]}"#).unwrap();
-        assert!(extract_reply(Provider::Gemini, &v).unwrap_err().contains("gemini"));
-        let v: Value = serde_json::from_str(r#"{"choices":[]}"#).unwrap();
-        assert!(extract_reply(Provider::OpenAi, &v).unwrap_err().contains("openai"));
-    }
-
     // --- R2c: short multi-turn memory ---
     struct Tmp(std::path::PathBuf);
 
@@ -719,8 +603,8 @@ mod tests {
     #[test]
     fn chr1_records_pairs_in_order() {
         let tmp = Tmp::new();
-        commit_in(&tmp.0, "q1", &Ok("a1".to_string()));
-        commit_in(&tmp.0, "q2", &Ok("a2".to_string()));
+        commit_in(&tmp.0, "q1", &Ok(SummonAction::Speak("a1".to_string())));
+        commit_in(&tmp.0, "q2", &Ok(SummonAction::Speak("a2".to_string())));
         assert_eq!(history_snapshot_in(&tmp.0), vec![pair("q1", "a1"), pair("q2", "a2")]);
     }
 
@@ -728,7 +612,7 @@ mod tests {
     fn chr2_forgets_oldest_beyond_depth() {
         let tmp = Tmp::new();
         for i in 1..=7 {
-            commit_in(&tmp.0, &format!("q{i}"), &Ok(format!("a{i}")));
+            commit_in(&tmp.0, &format!("q{i}"), &Ok(SummonAction::Speak(format!("a{i}"))));
         }
         let snap = history_snapshot_in(&tmp.0);
         assert_eq!(snap.len(), 6);
@@ -748,16 +632,16 @@ mod tests {
     #[test]
     fn ftd2_ok_appends_pair() {
         let tmp = Tmp::new();
-        commit_in(&tmp.0, "q", &Ok("a".to_string()));
+        commit_in(&tmp.0, "q", &Ok(SummonAction::Speak("a".to_string())));
         assert_eq!(history_snapshot_in(&tmp.0), vec![pair("q", "a")]);
     }
 
     #[test]
     fn ftd3_failed_turn_does_not_break_alternation() {
         let tmp = Tmp::new();
-        commit_in(&tmp.0, "q1", &Ok("a1".to_string()));
+        commit_in(&tmp.0, "q1", &Ok(SummonAction::Speak("a1".to_string())));
         commit_in(&tmp.0, "q2", &Err("boom".to_string()));
-        commit_in(&tmp.0, "q3", &Ok("a3".to_string()));
+        commit_in(&tmp.0, "q3", &Ok(SummonAction::Speak("a3".to_string())));
         assert_eq!(history_snapshot_in(&tmp.0), vec![pair("q1", "a1"), pair("q3", "a3")]);
     }
 
@@ -765,7 +649,7 @@ mod tests {
     fn successful_turn_row_has_timestamp_and_log_keeps_all_rows() {
         let tmp = Tmp::new();
         for i in 1..=7 {
-            commit_in(&tmp.0, &format!("q{i}"), &Ok(format!("a{i}")));
+            commit_in(&tmp.0, &format!("q{i}"), &Ok(SummonAction::Speak(format!("a{i}"))));
         }
         let text = std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap();
         assert_eq!(text.lines().count(), 7);
@@ -776,111 +660,11 @@ mod tests {
         assert!(first["ts"].as_str().unwrap().ends_with('Z'));
     }
 
-    // RequestCarriesHistory
-    #[test]
-    fn rch1_anthropic_prepends_history() {
-        let history = vec![pair("早安", "你好")];
-        let v = build_request(Provider::Anthropic, "誰在工作", &[], &[], &history, None);
-        let m = v["messages"].as_array().unwrap();
-        assert_eq!(m.len(), 3);
-        assert_eq!(m[0], json!({ "role": "user", "content": "早安" }));
-        assert_eq!(m[1], json!({ "role": "assistant", "content": "你好" }));
-        assert_eq!(m[2], json!({ "role": "user", "content": "誰在工作" }));
-        assert!(!v["system"].as_str().unwrap().is_empty());
-    }
-
-    #[test]
-    fn rch2_openai_roles_and_tail() {
-        let history = vec![pair("早安", "你好")];
-        let v = build_request(Provider::OpenAi, "誰在工作", &[], &[], &history, None);
-        let m = v["messages"].as_array().unwrap();
-        let roles: Vec<&str> = m.iter().map(|x| x["role"].as_str().unwrap()).collect();
-        assert_eq!(roles, ["system", "user", "assistant", "user"]);
-        assert_eq!(m.last().unwrap()["content"], "誰在工作");
-    }
-
-    #[test]
-    fn rch3_gemini_roles_and_texts() {
-        let history = vec![pair("早安", "你好")];
-        let v = build_request(Provider::Gemini, "誰在工作", &[], &[], &history, None);
-        let c = v["contents"].as_array().unwrap();
-        let roles: Vec<&str> = c.iter().map(|x| x["role"].as_str().unwrap()).collect();
-        assert_eq!(roles, ["user", "model", "user"]);
-        let texts: Vec<&str> =
-            c.iter().map(|x| x["parts"][0]["text"].as_str().unwrap()).collect();
-        assert_eq!(texts, ["早安", "你好", "誰在工作"]);
-    }
-
-    #[test]
-    fn rch4_empty_history_matches_single_turn() {
-        // Anthropic/OpenAI single-turn shape unchanged; Gemini gains role:user.
-        let a = build_request(Provider::Anthropic, "hi", &[], &[], &[], None);
-        assert_eq!(a["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(a["messages"][0], json!({ "role": "user", "content": "hi" }));
-
-        let o = build_request(Provider::OpenAi, "hi", &[], &[], &[], None);
-        let oroles: Vec<&str> = o["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|x| x["role"].as_str().unwrap())
-            .collect();
-        assert_eq!(oroles, ["system", "user"]);
-
-        let g = build_request(Provider::Gemini, "hi", &[], &[], &[], None);
-        assert_eq!(g["contents"].as_array().unwrap().len(), 1);
-        assert_eq!(g["contents"][0]["role"], "user");
-        assert_eq!(g["contents"][0]["parts"][0]["text"], "hi");
-    }
-
-    #[test]
-    fn fact_rows_never_enter_anthropic_or_gemini_requests() {
-        let tmp = Tmp::new();
-        std::fs::write(
-            tmp.0.join("memory.jsonl"),
-            "{\"verb\":\"inject\",\"text\":\"祕密指令ZZZ\"}\n{\"verb\":\"turn\",\"user\":\"q\",\"assistant\":\"a\"}\n",
-        )
-        .unwrap();
-        let history = history_snapshot_in(&tmp.0);
-        for provider in [Provider::Anthropic, Provider::Gemini] {
-            let request = build_request(provider, "now", &[], &[], &history, None).to_string();
-            assert!(request.contains("\"a\""));
-            assert!(!request.contains("祕密指令ZZZ"));
-            assert!(!request.contains("\"verb\""));
-        }
-    }
-
-    // RosterFreshNotInHistory
-    #[test]
-    fn rfh1_roster_in_system_history_user_verbatim() {
-        let history = vec![pair("hi", "hello")];
-        let v = build_request(Provider::Anthropic, "誰在工作", &[agent("builder", "working", "", "")], &[], &history, None);
-        assert!(v["system"].as_str().unwrap().contains("builder"));
-        let m = v["messages"].as_array().unwrap();
-        assert_eq!(m.len(), 3);
-        let first = m[0]["content"].as_str().unwrap();
-        assert_eq!(first, "hi");
-        assert!(!first.contains("builder"));
-        assert!(!first.contains("觀測到"));
-    }
-
-    #[test]
-    fn rfh2_roster_fully_from_current_param() {
-        let history = vec![pair("hi", "hello")];
-        let v1 = build_request(Provider::Anthropic, "誰在工作", &[agent("builder", "working", "", "")], &[], &history, None);
-        assert!(v1["system"].as_str().unwrap().contains("builder"));
-
-        let v2 = build_request(Provider::Anthropic, "誰在工作", &[agent("reviewer", "idle", "", "")], &[], &history, None);
-        let sys2 = v2["system"].as_str().unwrap();
-        assert!(sys2.contains("reviewer"));
-        assert!(!sys2.contains("builder"));
-    }
-
     // --- R2d: voice summon ---
     // SummonPromptInstruction
     #[test]
     fn spi1_prompt_carries_summon_json_literals() {
-        let out = system_prompt(&[], &[], None);
+        let out = system_prompt(&[], &[], None, &[]);
         assert!(out.contains(r#""action":"summon""#));
         assert!(out.contains(r#""project""#));
         assert!(out.contains(r#""task""#));
@@ -888,7 +672,7 @@ mod tests {
 
     #[test]
     fn spi2_summon_instruction_is_additive() {
-        let out = system_prompt(&[], &[], None);
+        let out = system_prompt(&[], &[], None, &[]);
         assert!(out.contains(SYSTEM_PROMPT));
         assert!(out.contains("沒有觀測到"));
         assert!(out.contains("語音辨識"));
@@ -897,7 +681,7 @@ mod tests {
     // DepthAnswerInstruction contract
     #[test]
     fn dai_t1_prompt_prioritizes_sources_and_forbids_guessing() {
-        let out = system_prompt(&[], &[], None);
+        let out = system_prompt(&[], &[], None, &[]);
         assert!(out.contains("精確訊號"));
         assert!(out.contains("畫面節錄"));
         assert!(out.contains("不要臆測"));
@@ -905,7 +689,7 @@ mod tests {
 
     #[test]
     fn dai_t2_instruction_preserves_existing_prompt_contracts() {
-        let out = system_prompt(&[], &[], None);
+        let out = system_prompt(&[], &[], None, &[]);
         assert!(out.contains(SYSTEM_PROMPT));
         assert!(out.contains("沒有觀測到"));
         assert!(out.contains("語音辨識"));
@@ -916,7 +700,7 @@ mod tests {
     // its rule is pinned literally: say 不知道, name no cause, claim no screen.
     #[test]
     fn dai_t3_no_depth_branch_forbids_inventing_a_source() {
-        let out = system_prompt(&[], &[], None);
+        let out = system_prompt(&[], &[], None, &[]);
         assert!(out.contains("兩行都沒有"));
         assert!(out.contains("「不知道」這三個字開頭"));
         assert!(out.contains("不得給任何原因"));
@@ -940,8 +724,13 @@ mod tests {
             screen: Some("cargo test\nerror[E0308]".into()),
         }];
         let ask_with = |depth: &[AgentDepth]| {
-            tauri::async_runtime::block_on(ask_once("builder 卡在什麼？", &roster, depth, &[]))
-                .unwrap()
+            let outcome =
+                tauri::async_runtime::block_on(ask_once("builder 卡在什麼？", &roster, depth, &[]))
+                    .unwrap();
+            let SummonAction::Speak(reply) = outcome else {
+                panic!("a 卡在什麼 question must be answered, not summoned: {outcome:?}");
+            };
+            reply
         };
 
         let precise_reply = ask_with(&precise);
@@ -1044,8 +833,8 @@ mod tests {
     #[test]
     #[ignore]
     fn sap9_live_summon_phrasing_parses_and_qa_does_not() {
-        // given a real provider: 「幫我開 <專案> 做 <事>」 -> parse_action(reply)
-        // is Summon; an ordinary question -> Speak (no false trigger).
+        // given a real provider: 「幫我開 <專案> 做 <事>」 -> the turn decides
+        // Summon; an ordinary question -> Speak (no false trigger).
         // --nocapture prints both replies as the transcript Review asks for.
         // run: <PROVIDER>_API_KEY=... cargo test sap9_live -- --ignored --nocapture
         //
@@ -1066,19 +855,19 @@ mod tests {
         };
 
         let summon = ask_isolated("幫我開 cyris 跑測試");
-        println!("summon turn reply: {summon}");
-        assert!(matches!(parse_action(&summon), SummonAction::Summon { .. }));
+        println!("summon turn outcome: {summon:?}");
+        assert!(matches!(summon, SummonAction::Summon { .. }));
 
         let qa = ask_isolated("現在誰在工作");
-        println!("q&a turn reply: {qa}");
-        assert!(matches!(parse_action(&qa), SummonAction::Speak(_)));
+        println!("q&a turn outcome: {qa:?}");
+        assert!(matches!(qa, SummonAction::Speak(_)));
     }
 
     // SummonHistoryCommit
     #[test]
     fn shc1_summon_turn_remembered_as_sentence() {
         let tmp = Tmp::new();
-        commit_in(&tmp.0, "幫我開 cyris 跑測試", &Ok(SUMMON_JSON.to_string()));
+        commit_in(&tmp.0, "幫我開 cyris 跑測試", &Ok(parse_action(SUMMON_JSON)));
         let (_, assistant) = history_snapshot_in(&tmp.0).pop().unwrap();
         assert_eq!(assistant, "（召喚 cyris：跑測試）");
         assert!(!assistant.contains('{'));
@@ -1088,7 +877,7 @@ mod tests {
     #[test]
     fn shc2_spoken_turn_stored_verbatim() {
         let tmp = Tmp::new();
-        commit_in(&tmp.0, "你好嗎", &Ok("你好".to_string()));
+        commit_in(&tmp.0, "你好嗎", &Ok(SummonAction::Speak("你好".to_string())));
         assert_eq!(history_snapshot_in(&tmp.0).pop().unwrap().1, "你好");
     }
 
@@ -1102,10 +891,345 @@ mod tests {
     #[test]
     fn summon_commit_never_persists_action_json() {
         let tmp = Tmp::new();
-        commit_in(&tmp.0, "幫我開 cyris 跑測試", &Ok(SUMMON_JSON.to_string()));
+        commit_in(&tmp.0, "幫我開 cyris 跑測試", &Ok(parse_action(SUMMON_JSON)));
         let row = std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap();
         assert!(row.contains("（召喚 cyris：跑測試）"));
         assert!(!row.contains(r#""action":"summon""#));
+    }
+
+    // --- the tool-use loop ---
+    use crate::backend::{always, then_exhausted, CallRef, FakeBackend, FakeTools};
+
+    fn read_pane(agent: &str) -> StepAction {
+        StepAction::ReadPane {
+            call: CallRef { id: None, name: "read_pane".into() },
+            agent: agent.into(),
+        }
+    }
+
+    fn run<C: Fn() -> Duration>(
+        backend: &mut FakeBackend,
+        tools: &FakeTools,
+        clock: C,
+    ) -> Result<SummonAction, String> {
+        tauri::async_runtime::block_on(run_turn_with(
+            backend,
+            &TurnStart::default(),
+            tools,
+            clock,
+            MAX_STEPS,
+        ))
+    }
+
+    fn spoken(result: Result<SummonAction, String>) -> String {
+        match result {
+            Ok(SummonAction::Speak(text)) => text,
+            other => panic!("expected speech, got {other:?}"),
+        }
+    }
+
+    // BackendStepInterface: the loop is generic over the trait and needs no
+    // provider knowledge to run a turn end to end.
+    #[test]
+    fn a_speaking_step_ends_the_turn_with_that_speech() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![StepAction::Speak("你好".into())])]);
+        let tools = FakeTools::new("");
+        assert_eq!(
+            run(&mut backend, &tools, always(45)),
+            Ok(SummonAction::Speak("你好".into()))
+        );
+        assert_eq!(backend.calls(), 1);
+        assert!(tools.reads().is_empty());
+    }
+
+    // LoopFeedsResultsBack
+    #[test]
+    fn a_tool_answer_reaches_the_next_request() {
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![read_pane("builder")]),
+            Ok(vec![StepAction::Speak("builder 在跑測試".into())]),
+        ]);
+        let tools = FakeTools::new("cargo test\nerror[E0308]");
+        assert_eq!(
+            run(&mut backend, &tools, always(45)),
+            Ok(SummonAction::Speak("builder 在跑測試".into()))
+        );
+        assert_eq!(backend.results_on(1).len(), 0);
+        let fed = backend.results_on(2);
+        assert_eq!(fed.len(), 1);
+        assert!(fed[0].text.contains("cargo test"));
+        assert_eq!(tools.reads(), vec!["builder"]);
+    }
+
+    #[test]
+    fn every_call_of_a_step_is_answered_in_emission_order() {
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![read_pane("builder"), read_pane("reviewer")]),
+            Ok(vec![StepAction::Speak("兩個都在跑測試".into())]),
+        ]);
+        let tools = FakeTools::new("cargo test");
+        assert!(run(&mut backend, &tools, always(45)).is_ok());
+        let fed = backend.results_on(2);
+        assert_eq!(fed.len(), 2);
+        assert!(fed.iter().all(|result| result.call.name == "read_pane"));
+        assert!(fed[0].text.contains("builder"));
+        assert!(fed[1].text.contains("reviewer"));
+        assert_eq!(tools.reads(), vec!["builder", "reviewer"]);
+    }
+
+    #[test]
+    fn a_tool_we_do_not_have_is_answered_in_band_not_as_a_failure() {
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![StepAction::Rejected {
+                call: CallRef { id: None, name: "recall".into() },
+                reason: "沒有這個工具：recall".into(),
+            }]),
+            Ok(vec![StepAction::Speak("我沒辦法回想".into())]),
+        ]);
+        let tools = FakeTools::new("cargo test");
+        assert!(run(&mut backend, &tools, always(45)).is_ok());
+        let fed = backend.results_on(2);
+        assert_eq!(fed.len(), 1);
+        assert_eq!(fed[0].text, "沒有這個工具：recall");
+        assert!(tools.reads().is_empty());
+    }
+
+    // A follow-up carrying an unanswered call is a wire error, so a deadline
+    // that lapses mid-step ends the turn instead of sending half a step.
+    #[test]
+    fn a_deadline_lapsing_mid_step_sends_no_partial_results() {
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![read_pane("builder")]),
+            Ok(vec![StepAction::Speak("不該問到這一步".into())]),
+        ]);
+        let tools = FakeTools::new("cargo test");
+        let message = spoken(run(&mut backend, &tools, then_exhausted(45)));
+        assert_eq!(backend.calls(), 1);
+        assert!(message.contains(TIMED_OUT));
+    }
+
+    // LoopBounds
+    #[test]
+    fn an_empty_hand_at_the_time_limit_says_so_plainly() {
+        assert_eq!(
+            exhausted_message(TIMED_OUT, &[], None),
+            "我還沒查到任何東西，但到了時間上限，還沒有結論，要我繼續查嗎？"
+        );
+    }
+
+    #[test]
+    fn the_step_limit_names_what_was_consulted() {
+        assert_eq!(
+            exhausted_message(OUT_OF_STEPS, &["builder 的畫面".to_string()], None),
+            "我查了 builder 的畫面，但到了步數上限，還沒有結論，要我繼續查嗎？"
+        );
+    }
+
+    #[test]
+    fn a_partial_finding_is_said_before_the_limit_is_admitted() {
+        assert_eq!(
+            exhausted_message(
+                OUT_OF_STEPS,
+                &["builder 的畫面".to_string()],
+                Some("builder 在跑測試")
+            ),
+            "到目前為止：builder 在跑測試。我查了 builder 的畫面，但到了步數上限，還沒有結論，要我繼續查嗎？"
+        );
+    }
+
+    #[test]
+    fn a_model_that_never_concludes_is_stopped_after_five_steps() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![read_pane("builder")])]);
+        let tools = FakeTools::new("cargo test");
+        let message = spoken(run(&mut backend, &tools, always(45)));
+        assert_eq!(backend.calls(), 5);
+        assert!(message.contains(OUT_OF_STEPS));
+        assert_eq!(message.matches("builder 的畫面").count(), 1);
+    }
+
+    #[test]
+    fn no_budget_left_costs_no_request_at_all() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![StepAction::Speak("不該被問".into())])]);
+        let tools = FakeTools::new("");
+        let message = spoken(run(&mut backend, &tools, || Duration::ZERO));
+        assert_eq!(backend.calls(), 0);
+        assert!(message.contains(TIMED_OUT));
+    }
+
+    // The per-request timeout is a function of the remaining turn budget, not a
+    // constant that could outlive the loop.
+    #[test]
+    fn the_request_budget_is_whatever_the_turn_has_left() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![StepAction::Speak("好".into())])]);
+        let tools = FakeTools::new("");
+        assert!(run(&mut backend, &tools, always(40)).is_ok());
+        assert_eq!(backend.budget_on(1), Duration::from_secs(40));
+    }
+
+    // SummonLoopTerminal — the loop stops the instant a summon is asked for, and
+    // has no way to open a pane itself: only the ✓ path can.
+    #[test]
+    fn a_summon_ends_the_turn_as_a_proposal() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![StepAction::Summon {
+            project: "cyris".into(),
+            task: "跑測試".into(),
+        }])]);
+        let tools = FakeTools::new("cargo test");
+        assert_eq!(
+            run(&mut backend, &tools, always(45)),
+            Ok(SummonAction::Summon { project: "cyris".into(), task: "跑測試".into() })
+        );
+        assert_eq!(backend.calls(), 1);
+        assert!(tools.reads().is_empty());
+    }
+
+    #[test]
+    fn a_summon_outranks_every_other_action_of_its_step() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![
+            StepAction::Speak("好".into()),
+            read_pane("builder"),
+            StepAction::Summon { project: "cyris".into(), task: "跑測試".into() },
+        ])]);
+        let tools = FakeTools::new("cargo test");
+        assert_eq!(
+            run(&mut backend, &tools, always(45)),
+            Ok(SummonAction::Summon { project: "cyris".into(), task: "跑測試".into() })
+        );
+        assert!(tools.reads().is_empty());
+    }
+
+    #[test]
+    fn only_the_first_summon_of_a_step_is_proposed() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![
+            StepAction::Summon { project: "cyris".into(), task: "跑測試".into() },
+            StepAction::Summon { project: "heartwood".into(), task: "修 bug".into() },
+        ])]);
+        let tools = FakeTools::new("");
+        assert_eq!(
+            run(&mut backend, &tools, always(45)),
+            Ok(SummonAction::Summon { project: "cyris".into(), task: "跑測試".into() })
+        );
+        assert_eq!(backend.calls(), 1);
+    }
+
+    // ProviderErrorEndsTurn — the mid-turn half; the provider-shaped first step
+    // is pinned in backend.rs, where a provider name is allowed to appear.
+    #[test]
+    fn a_failure_on_a_later_step_ends_the_turn_and_leaves_no_row() {
+        let tmp = Tmp::new();
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![read_pane("builder")]),
+            Err("brain request failed: timeout".to_string()),
+        ]);
+        let tools = FakeTools::new("cargo test");
+        let result = run(&mut backend, &tools, always(45));
+        assert_eq!(result, Err("brain request failed: timeout".to_string()));
+        commit_in(&tmp.0, "builder 在做什麼", &result);
+        assert!(!tmp.0.join("memory.jsonl").exists());
+        assert!(history_snapshot_in(&tmp.0).is_empty());
+    }
+
+    // SystemPromptToolClause
+    #[test]
+    fn no_declared_tool_means_no_tool_clause() {
+        assert!(!system_prompt(&[], &[], None, &[]).contains("read_pane"));
+    }
+
+    #[test]
+    fn a_declared_read_pane_is_named_without_dropping_the_不知道_fallback() {
+        let out = system_prompt(&[], &[], None, &crate::tools::specs());
+        assert!(out.contains("read_pane"));
+        assert!(out.contains(SYSTEM_PROMPT));
+        assert!(out.contains("沒有觀測到"));
+        assert!(out.contains("語音辨識"));
+        assert!(out.contains(r#""action":"summon""#));
+        assert!(out.contains("兩行都沒有"));
+        assert!(out.contains("「不知道」這三個字開頭"));
+        assert!(out.contains("不得給任何原因"));
+        // the clause precedes the fallback rather than replacing it
+        assert!(out.find("read_pane").unwrap() < out.find("「不知道」這三個字開頭").unwrap());
+    }
+
+    #[test]
+    fn the_curated_memory_ordering_survives_the_new_parameter() {
+        let out = system_prompt(&[], &[], Some("Nick 偏好簡短回答"), &crate::tools::specs());
+        let memory = out.find("長期記憶").unwrap();
+        let roster = out.find("目前沒有觀測到 agent。").unwrap();
+        assert!(memory < roster);
+        assert!(out.contains("Nick 偏好簡短回答"));
+    }
+
+    // TurnCommitSingleRow — one utterance, one row, however much was looked at.
+    #[test]
+    fn a_two_step_turn_leaves_one_row_carrying_only_the_conclusion() {
+        let tmp = Tmp::new();
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![read_pane("builder")]),
+            Ok(vec![StepAction::Speak("builder 在跑測試".into())]),
+        ]);
+        let tools = FakeTools::new("cargo test\nerror[E0308]");
+        let result = run(&mut backend, &tools, always(45));
+        commit_in(&tmp.0, "builder 在做什麼", &result);
+
+        let text = std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let row: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(row["verb"], "turn");
+        assert_eq!(row["assistant"], "builder 在跑測試");
+        // the on-demand layer lives only for the turn that fetched it
+        assert!(!text.contains("error[E0308]"));
+        assert!(!text.contains("觀測輸出"));
+    }
+
+    #[test]
+    fn a_summon_terminal_turn_leaves_one_sentence_not_the_action_json() {
+        let tmp = Tmp::new();
+        let mut backend = FakeBackend::new(vec![Ok(vec![StepAction::Summon {
+            project: "cyris".into(),
+            task: "跑測試".into(),
+        }])]);
+        let tools = FakeTools::new("");
+        let result = run(&mut backend, &tools, always(45));
+        commit_in(&tmp.0, "幫我開 cyris 跑測試", &result);
+
+        let text = std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let row: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(row["assistant"], "（召喚 cyris：跑測試）");
+        assert!(!text.contains(r#""action":"summon""#));
+    }
+
+    #[test]
+    fn an_exhausted_turn_is_remembered_as_an_ordinary_spoken_one() {
+        let tmp = Tmp::new();
+        let mut backend = FakeBackend::new(vec![Ok(vec![read_pane("builder")])]);
+        let tools = FakeTools::new("cargo test");
+        let result = run(&mut backend, &tools, always(45));
+        commit_in(&tmp.0, "builder 在做什麼", &result);
+
+        let text = std::fs::read_to_string(tmp.0.join("memory.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let row: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert!(row["assistant"].as_str().unwrap().contains(OUT_OF_STEPS));
+    }
+
+    #[test]
+    fn seven_multi_step_turns_still_keep_six_alternating_pairs() {
+        let tmp = Tmp::new();
+        for i in 1..=7 {
+            let mut backend = FakeBackend::new(vec![
+                Ok(vec![read_pane("builder")]),
+                Ok(vec![StepAction::Speak(format!("a{i}"))]),
+            ]);
+            let tools = FakeTools::new("cargo test");
+            let result = run(&mut backend, &tools, always(45));
+            commit_in(&tmp.0, &format!("q{i}"), &result);
+        }
+        let snap = history_snapshot_in(&tmp.0);
+        assert_eq!(snap.len(), 6);
+        assert!(!snap.iter().any(|(user, _)| user == "q1"));
+        assert_eq!(snap.first().unwrap().0, "q2");
+        assert_eq!(snap.last().unwrap(), &pair("q7", "a7"));
     }
 
     // MultiTurnLiveRecall — live end-to-end, stays #[ignore] (needs herdr + key).

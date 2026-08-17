@@ -98,10 +98,9 @@ async fn process_utterance(
     })
     .await
     .map_err(|e| format!("brain: {e}"))?;
-    let reply = voice::reply_to_transcript(&transcript, &roster, &depth)
+    let action = voice::reply_to_transcript(&transcript, &roster, &depth)
         .await
         .map_err(|e| format!("brain: {e}"))?;
-    let action = brain::parse_action(&reply);
     let cwd = match &action {
         brain::SummonAction::Summon { project, .. } => resolve_project(&workspace_root(), project)
             .map(|p| p.to_string_lossy().into_owned()),

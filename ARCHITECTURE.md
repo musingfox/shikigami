@@ -28,7 +28,14 @@ Rules that keep the core clean:
 2. **Adapters own their own dirt.** Everything SumVox-specific — paths under
    `~/.config/sumvox/`, the history line format, the `muted` flag file — lives
    inside `sumvox.rs` behind its public fns (`recent`, `is_muted`, `set_muted`,
-   `config_dir`, `spawn_watcher`).
+   `config_dir`, `spawn_watcher`). The same rule holds for the model providers:
+   `backend.rs` is the **port** — the `Backend` "advance the turn one step" trait,
+   the provider-neutral `StepAction` / `ToolResult` values, provider selection and
+   credentials — and every request/response key belongs to one of its two
+   adapters, `backend_gemini.rs` (native function calling) and `backend_text.rs`
+   (openai + anthropic through the prose JSON-action path). `brain.rs` keeps the
+   prompt, the decision loop and the memory commit, and names no provider;
+   `tools.rs` holds what the model may reach for during a turn.
 3. **Presentation modules have one-verb APIs**: `initAvatar`, `setLevel`,
    `setSpeaking`, `lipsync(path)`, `toast(text)`. The composition root
    (`src/main.ts`) is the only place events meet presenters.

@@ -32,11 +32,14 @@ pub fn route(action: SummonAction, cwd: Option<String>) -> Utterance {
 }
 
 /// Each voice reply is grounded in the roster snapshot passed by the caller at
+/// the start of the utterance. The brain already decided what the turn amounts
+/// to, so the action comes back as an action — nothing re-serialises it into
+/// text for the caller to re-parse.
 pub async fn reply_to_transcript(
     transcript: &str,
     roster: &[AgentEntry],
     depth: &[AgentDepth],
-) -> Result<String, String> {
+) -> Result<SummonAction, String> {
     if transcript.trim().is_empty() {
         return Err("empty transcript".to_string());
     }
@@ -192,19 +195,22 @@ mod tests {
             .expect("live depth must join by the exact herdr pane_id");
         assert!(matched.precise.is_some() || matched.screen.is_some());
 
-        let prompt = crate::brain::system_prompt(&roster, &depth, None);
+        let prompt = crate::brain::system_prompt(&roster, &depth, None, &[]);
         println!(
             "join receipt: HERDR_PANE_ID={} herdr pane_id={}\n\nsystem prompt:\n{}",
             matched.pane, observed.pane, prompt
         );
         assert!(prompt.contains("精確訊號") || prompt.contains("畫面節錄"));
 
-        let reply = tauri::async_runtime::block_on(reply_to_transcript(
+        let outcome = tauri::async_runtime::block_on(reply_to_transcript(
             "它卡在什麼？",
             &roster,
             &depth,
         ))
         .unwrap();
+        let SummonAction::Speak(reply) = outcome else {
+            panic!("a 卡在什麼 question must be answered, not summoned: {outcome:?}");
+        };
         assert!(!reply.trim().is_empty());
     }
 }

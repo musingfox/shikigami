@@ -191,14 +191,6 @@ impl Provider {
         }
     }
 
-    pub(crate) fn model(self) -> &'static str {
-        match self {
-            Provider::Gemini => "gemini-2.5-flash",
-            Provider::OpenAi => "gpt-4.1-mini",
-            Provider::Anthropic => "claude-haiku-4-5",
-        }
-    }
-
     /// (env var, key file under ~/.config/shikigami/)
     fn key_sources(self) -> (&'static str, &'static str) {
         match self {
@@ -259,12 +251,68 @@ pub fn pick_provider(explicit: Option<&str>, available: [bool; 3]) -> Result<Pro
         })
 }
 
-pub(crate) fn detect_provider() -> Result<(Provider, String), String> {
+fn detect_provider() -> Result<(Provider, String), String> {
     let explicit = std::env::var("SHIKIGAMI_BRAIN").ok();
     let available = PROVIDERS.map(|p| load_key(p).is_ok());
     let provider = pick_provider(explicit.as_deref(), available)?;
     let key = load_key(provider)?;
     Ok((provider, key))
+}
+
+/// Whichever backend answers this utterance. A two-arm enum rather than a
+/// `Box<dyn Backend>`: the trait's future is an RPITIT, so this delegating impl
+/// is the only place in the app that matches on which provider was chosen.
+pub(crate) enum SelectedBackend {
+    Gemini(crate::backend_gemini::GeminiBackend),
+    Chat(crate::backend_text::TextBackend),
+}
+
+impl Backend for SelectedBackend {
+    fn name(&self) -> &'static str {
+        match self {
+            SelectedBackend::Gemini(backend) => backend.name(),
+            SelectedBackend::Chat(backend) => backend.name(),
+        }
+    }
+
+    fn tools(&self) -> Vec<ToolSpec> {
+        match self {
+            SelectedBackend::Gemini(backend) => backend.tools(),
+            SelectedBackend::Chat(backend) => backend.tools(),
+        }
+    }
+
+    async fn step(
+        &mut self,
+        turn: &TurnStart,
+        results: &[ToolResult],
+        budget: Duration,
+    ) -> Result<Vec<StepAction>, String> {
+        match self {
+            SelectedBackend::Gemini(backend) => backend.step(turn, results, budget).await,
+            SelectedBackend::Chat(backend) => backend.step(turn, results, budget).await,
+        }
+    }
+}
+
+/// Build the backend one utterance will use. Cheapest-first is a *selection-time*
+/// order only: once a turn has started there is no failover — a request failure
+/// ends the turn rather than silently retrying or handing off.
+pub(crate) fn detect() -> Result<SelectedBackend, String> {
+    let (provider, key) = detect_provider()?;
+    Ok(match provider {
+        Provider::Gemini => {
+            SelectedBackend::Gemini(crate::backend_gemini::GeminiBackend::new(key))
+        }
+        Provider::OpenAi => SelectedBackend::Chat(crate::backend_text::TextBackend::new(
+            crate::backend_text::ChatFlavor::OpenAi,
+            key,
+        )),
+        Provider::Anthropic => SelectedBackend::Chat(crate::backend_text::TextBackend::new(
+            crate::backend_text::ChatFlavor::Anthropic,
+            key,
+        )),
+    })
 }
 
 /// Carry provider key files into a throwaway config root — and nothing else,
@@ -284,6 +332,133 @@ pub(crate) fn copy_provider_keys(from: &std::path::Path, to: &std::path::Path) {
             if std::fs::write(&dest, key).is_ok() {
                 let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
             }
+        }
+    }
+}
+
+/// A backend that answers from a script and records what the loop handed it.
+/// Lives beside the port rather than inside one test module so both the loop's
+/// tests and the port's own can drive it.
+#[cfg(test)]
+pub(crate) struct FakeBackend {
+    script: Vec<Result<Vec<StepAction>, String>>,
+    calls: usize,
+    results: Vec<Vec<ToolResult>>,
+    budgets: Vec<Duration>,
+}
+
+#[cfg(test)]
+impl FakeBackend {
+    pub(crate) fn new(script: Vec<Result<Vec<StepAction>, String>>) -> Self {
+        assert!(!script.is_empty(), "a scripted backend needs at least one answer");
+        Self {
+            script,
+            calls: 0,
+            results: Vec::new(),
+            budgets: Vec::new(),
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls
+    }
+
+    /// The tool results the loop sent on step `step` (1-based).
+    pub(crate) fn results_on(&self, step: usize) -> &[ToolResult] {
+        &self.results[step - 1]
+    }
+
+    /// The per-request budget the loop passed on step `step` (1-based).
+    pub(crate) fn budget_on(&self, step: usize) -> Duration {
+        self.budgets[step - 1]
+    }
+}
+
+#[cfg(test)]
+impl Backend for FakeBackend {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+
+    fn tools(&self) -> Vec<ToolSpec> {
+        Vec::new()
+    }
+
+    fn step(
+        &mut self,
+        _turn: &TurnStart,
+        results: &[ToolResult],
+        budget: Duration,
+    ) -> impl Future<Output = Result<Vec<StepAction>, String>> + Send {
+        self.results.push(results.to_vec());
+        self.budgets.push(budget);
+        // the last scripted answer repeats, so "keeps asking for another look" is
+        // a one-entry script
+        let index = self.calls.min(self.script.len() - 1);
+        self.calls += 1;
+        std::future::ready(self.script[index].clone())
+    }
+}
+
+/// A tool runner with no socket behind it: it builds the same body the live
+/// runner would from an injected pane text, and records who was read.
+#[cfg(test)]
+pub(crate) struct FakeTools {
+    roster: Vec<crate::events::AgentEntry>,
+    screen: String,
+    reads: std::sync::Mutex<Vec<String>>,
+}
+
+#[cfg(test)]
+impl FakeTools {
+    pub(crate) fn new(screen: &str) -> Self {
+        let entry = |name: &str, pane: &str| crate::events::AgentEntry {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            pane: pane.to_string(),
+            status: "working".to_string(),
+            title: String::new(),
+            cwd: String::new(),
+        };
+        Self {
+            roster: vec![entry("builder", "%1"), entry("reviewer", "%2")],
+            screen: screen.to_string(),
+            reads: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn reads(&self) -> Vec<String> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+impl crate::tools::Tools for FakeTools {
+    fn read_pane(&self, agent: &str) -> impl Future<Output = String> + Send {
+        self.reads.lock().unwrap().push(agent.to_string());
+        let screen = self.screen.clone();
+        std::future::ready(crate::tools::read_pane_body(&self.roster, agent, move |_| {
+            Ok(screen)
+        }))
+    }
+}
+
+/// A clock with room to spare on every check.
+#[cfg(test)]
+pub(crate) fn always(secs: u64) -> impl Fn() -> Duration {
+    move || Duration::from_secs(secs)
+}
+
+/// A clock that answers once and then reports nothing left — a deadline lapsing
+/// mid-step, which is when partial tool results would be the tempting mistake.
+#[cfg(test)]
+pub(crate) fn then_exhausted(first: u64) -> impl Fn() -> Duration {
+    let checks = std::sync::atomic::AtomicUsize::new(0);
+    move || {
+        if checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            Duration::from_secs(first)
+        } else {
+            Duration::ZERO
         }
     }
 }
@@ -440,6 +615,24 @@ mod tests {
             ),
             StepAction::Summon { project: "cyris".into(), task: "跑測試".into() }
         );
+    }
+
+    // ProviderErrorEndsTurn: the failing string is provider-shaped, so this half
+    // of the contract is pinned here rather than in the provider-free loop module.
+    #[test]
+    fn a_provider_failure_ends_the_turn_without_a_retry_or_a_hand_off() {
+        let mut backend = FakeBackend::new(vec![Err("gemini API 503: overloaded".to_string())]);
+        let tools = FakeTools::new("");
+        let got = tauri::async_runtime::block_on(crate::brain::run_turn_with(
+            &mut backend,
+            &TurnStart::default(),
+            &tools,
+            always(45),
+            crate::brain::MAX_STEPS,
+        ));
+        assert_eq!(got, Err("gemini API 503: overloaded".to_string()));
+        assert_eq!(backend.calls(), 1);
+        assert!(tools.reads().is_empty());
     }
 
     // The prose summon convention must not reach the speaker on any path.

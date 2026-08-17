@@ -79,7 +79,7 @@ pub(crate) fn gemini_request(turn: &TurnStart, tools: &[ToolSpec], tail: &[Value
 pub(crate) fn gemini_step(response: &Value) -> Result<Vec<StepAction>, String> {
     let mut actions = Vec::new();
     let mut said = String::new();
-    let mut flush = |said: &mut String, actions: &mut Vec<StepAction>| {
+    let flush = |said: &mut String, actions: &mut Vec<StepAction>| {
         if !said.trim().is_empty() {
             actions.push(text_action(said));
         }
@@ -256,7 +256,7 @@ mod tests {
 
     fn turn_for(roster: &[AgentEntry], history: &[(String, String)], transcript: &str) -> TurnStart {
         TurnStart {
-            system: crate::brain::system_prompt(roster, &[], None),
+            system: crate::brain::system_prompt(roster, &[], None, &[]),
             history: history.to_vec(),
             transcript: transcript.to_string(),
         }
