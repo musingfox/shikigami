@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
-/// Moves the whole config root — models/, hooks.ndjson, API key files, memory —
-/// somewhere else. Set it to run shikigami against a throwaway profile.
+/// Test/advanced override: relocates the ENTIRE config root — models/,
+/// hooks.ndjson, API key files, memory. Not a profile mechanism. Under it the
+/// STT model is looked for in the new `models/`, and the tailed `hooks.ndjson`
+/// is no longer the file `scripts/cc-hook.sh` writes (it hardcodes
+/// `~/.config/shikigami`), so channel ① goes silent without saying so.
 pub const CONFIG_DIR_ENV: &str = "SHIKIGAMI_CONFIG_DIR";
 
 /// shikigami's own config dir — models/, hooks.ndjson, API key files.
