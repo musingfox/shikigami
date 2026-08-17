@@ -422,7 +422,10 @@ where
                         //
                         // ponytail: the receipt does NOT cover the whole gap. It
                         // uses a test seam that declares a tool the app cannot run;
-                        // production's case is a name nobody declared at all. The
+                        // production's case is a name nobody declared at all. It is
+                        // one step further from production than even that: the
+                        // transcript's prompt names the tool outright, so the model
+                        // was steered to the call rather than choosing it. The
                         // replay path is the same code either way, so what stays
                         // unverified is upstream of it: whether gemini ever emits
                         // an undeclared name. Closing that needs an inherently
