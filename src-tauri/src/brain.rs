@@ -877,11 +877,19 @@ mod tests {
     /// Carry provider key files into a throwaway config root — and nothing else,
     /// so memory stays isolated. A missing key file is silent: the env-var form
     /// is the other half of `load_key` and must keep working on its own.
+    ///
+    /// The copy is chmod 0600 because `temp_dir()` is only private when TMPDIR
+    /// is set (macOS gives a per-user 0700 dir); with it unset Rust falls back
+    /// to a world-readable /tmp, and a real API key would land there at 0644.
     fn copy_provider_keys(from: &std::path::Path, to: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
         for provider in PROVIDERS {
             let (_, file_name) = provider.key_sources();
             if let Ok(key) = std::fs::read_to_string(from.join(file_name)) {
-                let _ = std::fs::write(to.join(file_name), key);
+                let dest = to.join(file_name);
+                if std::fs::write(&dest, key).is_ok() {
+                    let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
+                }
             }
         }
     }
