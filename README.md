@@ -31,6 +31,6 @@ scripts/demo.sh "hello"  # fire a fake notification: toast + lip-sync
 ```
 
 Status: **R0–R2, R-observe, R-memory done**, plus the tool-use loop
-(`R-tool-loop` increment 1) — both channels closed, memory survives a restart,
+(`R-tool-loop` increments 1–2) — both channels closed, memory survives a restart,
 and the brain can look something up before it answers.
 Architecture: `ARCHITECTURE.md`. Context for agents: `CLAUDE.md`.

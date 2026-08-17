@@ -79,9 +79,9 @@ something up and then answer* — a real multi-step tool-use loop, verified live
 
 What it still is **not**: an agent that acts on its own. **Nothing wakes it but
 your voice** (`r-brain-event-driven`), and it still cannot search its own memory
-or write to it — `recall`, the curated-layer `memory` writer, `/context`, and
-moving depth off the prefetch path are increments 2–4 of `r-brain-tool-loop`,
-still open.
+or write to it — `recall`, the curated-layer `memory` writer and `/context` are
+increments 3–4 of `r-brain-tool-loop`, still open. (Increment 2 landed the same
+day: an utterance no longer costs a pane read.)
 
 Shell and voice Q&A:
 
@@ -120,12 +120,22 @@ Depth of observation (R-observe, 2026-08-16, `main` @ `f352e16`):
   `stop.last_assistant_message`, parsed in `cchooks.rs`, snake_case with
   camelCase fallback) plus, for ≤3 blocked/working agents, a `pane.read`
   excerpt. Bounded: 6 lines/200 chars precise, 12/600 screen, 2000 global,
-  truncated by char with the tail kept
+  truncated by char with the tail kept.
+  **Superseded 2026-08-17 (increment 2):** the `pane.read` half is gone from this
+  path — it is the `read_pane` tool now, so an utterance costs no pane read at all.
+  Only the precise half is still prefetched, and every one of those numbers now
+  lives in `budget.rs`
 - `render_roster` now marks status as herdr's screen *inference*, and the depth
   block is fenced as observed output, not instruction
-- The join key is herdr's `pane_id` == the hook's `HERDR_PANE_ID`. The screen
-  half is verified live (`vdp_t2`); **the hook half is not yet** — see the
-  archived ticket's "未收齊的收據"
+- The join key is herdr's `pane_id` == the hook's `HERDR_PANE_ID`. **Both halves
+  are now verified live 2026-08-17** — `vdp_t2` used to pass on the screen half
+  alone, which is precisely why the hook half had no receipt; removing the screen
+  prefetch left it nowhere to hide, and it now asserts `precise.is_some()` **and**
+  `screen.is_none()`. Receipt: `HERDR_PANE_ID=w7Q:p1 herdr pane_id=w7Q:p1` with
+  `精確訊號：permission_prompt：Claude needs your permission` in the prompt. The
+  archived ticket's "未收齊的收據" is closed. Note the mechanism: a test binary runs
+  neither the roster poll nor the spool tailer, so a live test must read both
+  itself (`herdr::fetch_roster_now`, and `record_depth` over `spool_path`)
 - `AgentEntry` and `events.ts` deliberately untouched: depth reaches the brain
   only. Showing it in the UI is a separate, unopened ticket
 
@@ -174,10 +184,9 @@ The loop that makes it an agent (R-tool-loop increment 1, 2026-08-17):
   fast path still answers in one request. **`Summon` is loop-terminal** — the loop
   module cannot reach `herdr::summon`/`prompt_agent` at all, so the confirm is
   non-bypassable *by construction*, not by policy
-- `read_pane(agent)` is the thin version: existing `pane_recent_text` +
-  `normalize(_, 12, 600)` on `spawn_blocking`, agent resolved against the turn's
-  roster snapshot (never a fresh socket), result fenced as observed output.
-  **The ≤3-pane prefetch is still on the fast path** — removing it is increment 2
+- `read_pane(agent)` wraps `pane_recent_text` + `normalize(_, SCREEN_MAX_*)` on
+  `spawn_blocking`, agent resolved against the turn's roster snapshot (never a
+  fresh socket), result fenced as observed output
 - `consulted` carries only panes actually reached, under the **roster's** name. A
   failed read or a name the model invented is told to the model but never spoken
   as a source — R-observe's invented-source defect reappeared here in new clothes
@@ -185,6 +194,24 @@ The loop that makes it an agent (R-tool-loop increment 1, 2026-08-17):
 - One `verb:"turn"` row per utterance regardless of step count; tool calls and
   results are the on-demand layer and never persist. Single-attempt/no-failover is
   **kept deliberately** and pinned by a test — not changed inside a refactor
+
+The fast path stops paying (increment 2, 2026-08-17):
+
+- The screen half of depth left the prefetch path, so **an utterance costs zero
+  pane reads** — that is what makes the ticket's "the loop moves the cost to the
+  turn that needs it" true; until this landed, both paths ran and the fast path
+  paid twice. The precise half stays prefetched: it reads the hook spool already in
+  memory, costs nothing, and it is what answers "stuck on WHAT"
+- `select_panes` and its `take(3)` are gone with it, and `roster_and_depth_with`
+  no longer blocks at all (roster is herdr's cache, precise is the spool — two mutex
+  reads), so `lib.rs` dropped the `spawn_blocking` around it
+- **`budget.rs` is the one page** of context budgets, grouped by the four layers.
+  `AgentDepth::screen` is kept though nothing populates it: `render_roster` still
+  renders it, and that is the slot an event-driven turn would fill
+- Known gap, **not** caused here: `dai_live`'s "no source → must say 不知道" assertion
+  is flaky against the live model (~1 in 5). The request on that path is
+  byte-equivalent to `404f40c`'s, so R-observe's central invariant is *unlikely*
+  rather than *closed* — worth its own ticket
 
 ## Architecture
 
@@ -319,21 +346,27 @@ speak to N, then breadth. Avatar/Linux are off the critical path.
   never bulk-injected. Storage is format-stable across the still-open loop
   question, which is why this shipped without it. Ticket
   `r-brain-durable-memory`; follow-ups in `memory-read-and-durability-polish`.
-- **R-tool-loop — the loop that makes it an agent** — **increment 1 DONE
+- **R-tool-loop — the loop that makes it an agent** — **increments 1 and 2 DONE
   2026-08-17**, split into four at the interface boundary (a human call: 11
-  criteria over 5 files was too much for one review). Shipped: the `Backend` port
-  + two adapters, the 5-step/45s loop, gemini native function calling, Speak/Summon
-  as tools with Summon loop-terminal, and a thin `read_pane` — pulled into
-  increment 1 because a loop whose only tools are terminal can never take a second
-  step, so criterion 4 would have had no real receipt. Still open: **increment 2**
-  `read_pane` off the prefetch path + budget constants in one place + the
-  no-write-back test; **increment 3** `recall` + the `memory` curated writer and
-  its four guardrails; **increment 4** `/context`. Two findings worth keeping:
+  criteria over 5 files was too much for one review). Increment 1: the `Backend`
+  port + two adapters, the 5-step/45s loop, gemini native function calling,
+  Speak/Summon as tools with Summon loop-terminal, and a thin `read_pane` — pulled
+  forward because a loop whose only tools are terminal can never take a second
+  step, so criterion 4 would have had no real receipt. Increment 2: the screen half
+  off the prefetch path (an utterance now costs zero pane reads), every context
+  budget in `budget.rs`, and the no-write-back proof. Still open: **increment 3**
+  `recall` + the `memory` curated writer and its four guardrails; **increment 4**
+  `/context`. Findings worth keeping:
   `thinkingBudget: 0` does **not** break gemini-2.5-flash function calling
   (live-verified — no offline test could have said either way), and **R-observe's
   invented-source defect grew back in the new code** as "a failed pane read still
   counted as consulted", caught only by a post-hoc review pass, which is the second
-  time this brain has had to be stopped from naming a source it never had. Ticket
+  time this brain has had to be stopped from naming a source it never had. And a
+  third thing, from increment 2: **a live test can pass on the wrong half** —
+  `vdp_t2` had been standing in as the pane-id join's receipt while only ever
+  exercising the screen excerpt, and deleting that half is what revealed the hook
+  half was unchecked — the archived ticket said so in writing and it still read as
+  covered. Ticket
   `r-brain-tool-loop`.
 - **R-event-driven — it wakes on the world, not only on you** (2026-08-16):
   hooks events reach the brain's judgement, with a silence-by-default rule and a
