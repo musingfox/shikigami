@@ -54,7 +54,10 @@ own state, on disk so it survives a restart. Three layers, two files under
 - `MEMORY.md` — hand-written by the user, injected into every system prompt as
   trusted text. Absent / blank / unreadable leaves the prompt byte-identical.
 
-Only `turn` rows reach the model; fact rows are for a future `recall` tool.
+Only `turn` rows reach the model on their own, as the rolling layer. Every row —
+`turn`, `inject` and `summon` alike, across both generations — is searchable by
+the `recall` tool: it costs nothing until the model asks for it, and what it
+fetches lives for that turn only.
 
 `SHIKIGAMI_CONFIG_DIR` relocates that whole root (tests, and advanced use). It
 moves `models/` and `hooks.ndjson` too, while `scripts/cc-hook.sh` keeps writing

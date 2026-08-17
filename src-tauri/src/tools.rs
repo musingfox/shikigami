@@ -114,6 +114,99 @@ where
     }
 }
 
+/// The tool-result body for one `recall` call, plus the timestamps of the rows
+/// that really ended up in it. Never fails: nothing matching is a plain sentence
+/// saying so, not an error.
+///
+/// The returned timestamps are the second half on purpose, in the same spirit as
+/// `PaneRead::consulted`: only rows that survived both caps are named, so a later
+/// step can never quote a ts that was dropped before the model ever saw it.
+///
+/// Rows read oldest-first and are matched as rendered — one substring compare
+/// over the whole line — so a query can name an agent, a project, a pane or any
+/// word of the text itself without the model having to know the field names. An
+/// empty query is "everything", bounded by the same two caps.
+pub(crate) fn recall_body(
+    rows: &[crate::memory::MemoryRow],
+    query: &str,
+) -> (String, Vec<String>) {
+    let needle = query.trim().to_lowercase();
+    let mut kept: Vec<(String, String)> = rows
+        .iter()
+        .map(|row| (row.ts.clone(), render_row(row)))
+        .filter(|(_, line)| needle.is_empty() || line.to_lowercase().contains(&needle))
+        .collect();
+
+    // Newest first out of the door: an old row is the one the model is least
+    // likely to have meant.
+    if kept.len() > crate::budget::RECALL_MAX_ROWS {
+        kept.drain(..kept.len() - crate::budget::RECALL_MAX_ROWS);
+    }
+    while kept.len() > 1 && rendered_chars(&kept) > crate::budget::RECALL_MAX_CHARS {
+        kept.remove(0);
+    }
+
+    if kept.is_empty() {
+        return (
+            format!("記憶裡沒有查到和「{}」有關的紀錄。", query.trim()),
+            Vec::new(),
+        );
+    }
+    let body = kept
+        .iter()
+        .map(|(_, line)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = format!(
+        "長期記憶裡查到這些紀錄（每列開頭是它的時間戳）：\n{}\n{body}\n{}",
+        crate::depth::FENCE_OPEN,
+        crate::depth::FENCE_CLOSE
+    );
+    (text, kept.into_iter().map(|(ts, _)| ts).collect())
+}
+
+fn rendered_chars(rows: &[(String, String)]) -> usize {
+    rows.iter().map(|(_, line)| line.chars().count()).sum::<usize>() + rows.len().saturating_sub(1)
+}
+
+/// One memory row as one line, timestamp first. The ts leads because it is what a
+/// later write has to quote as its source; the free text is what gets cut when a
+/// row is too long, and it is cut from the tail so the ts survives.
+fn render_row(row: &crate::memory::MemoryRow) -> String {
+    let subject = match row.verb.as_str() {
+        "summon" => row.project.as_deref().or(row.agent.as_deref()),
+        _ => row.agent.as_deref().or(row.project.as_deref()),
+    }
+    .or(row.pane.as_deref())
+    .unwrap_or("未知對象");
+    match row.verb.as_str() {
+        "turn" => format!(
+            "{} 對話 你：{} ／ 式神：{}",
+            row.ts,
+            fit_row_text(row.user.as_deref().unwrap_or_default()),
+            fit_row_text(row.assistant.as_deref().unwrap_or_default())
+        ),
+        "inject" => format!("{} 交辦 {subject}：{}", row.ts, fit_row_text(&row.text)),
+        "summon" => format!("{} 召喚 {subject}：{}", row.ts, fit_row_text(&row.text)),
+        other => format!("{} {other} {subject}：{}", row.ts, fit_row_text(&row.text)),
+    }
+}
+
+/// One row's free text on one line, head kept. `depth::normalize` keeps the tail,
+/// which is the wrong end here: the beginning of what was said is what identifies
+/// the record.
+fn fit_row_text(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= crate::budget::RECALL_ROW_MAX_CHARS {
+        return flat;
+    }
+    let head: String = flat
+        .chars()
+        .take(crate::budget::RECALL_ROW_MAX_CHARS)
+        .collect();
+    format!("{head}…")
+}
+
 /// A spoken agent name -> the roster row it names. Resolved against the turn's
 /// snapshot only: a tool call must never cost a fresh herdr socket.
 fn resolve<'a>(roster: &'a [AgentEntry], agent: &str) -> Option<&'a AgentEntry> {
@@ -246,6 +339,151 @@ mod tests {
         // The pane was reached, so looking and finding nothing still counts as
         // having consulted it — unlike a read that never landed.
         assert_eq!(read.consulted.as_deref(), Some("builder 的畫面"));
+    }
+
+    // --- recall ---
+    use crate::budget::{RECALL_MAX_CHARS, RECALL_MAX_ROWS, RECALL_ROW_MAX_CHARS};
+    use crate::memory::MemoryRow;
+
+    fn mem_row(ts: &str, verb: &str, text: &str) -> MemoryRow {
+        MemoryRow {
+            ts: ts.to_string(),
+            verb: verb.to_string(),
+            text: text.to_string(),
+            pane: None,
+            agent: None,
+            project: None,
+            user: None,
+            assistant: None,
+        }
+    }
+
+    fn two_rows() -> Vec<MemoryRow> {
+        let mut inject = mem_row("T1", "inject", "跑測試");
+        inject.agent = Some("cyris".to_string());
+        let mut summon = mem_row("T2", "summon", "修 bug");
+        summon.project = Some("heartwood".to_string());
+        vec![inject, summon]
+    }
+
+    #[test]
+    fn a_query_brings_back_the_matching_rows_with_their_timestamps() {
+        let (text, found) = recall_body(&two_rows(), "cyris");
+        assert!(text.contains("T1"));
+        assert!(text.contains("跑測試"));
+        assert!(!text.contains("修 bug"));
+        assert_eq!(found, vec!["T1".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_query_is_everything_oldest_first() {
+        let (text, found) = recall_body(&two_rows(), "");
+        assert!(text.find("T1").unwrap() < text.find("T2").unwrap());
+        assert_eq!(found, vec!["T1".to_string(), "T2".to_string()]);
+    }
+
+    // Nothing found is an answer, not an error — and it is the app's own words,
+    // so it carries no observation fence.
+    #[test]
+    fn nothing_found_says_so_plainly_and_names_no_source() {
+        let (text, found) = recall_body(&two_rows(), "不存在的東西");
+        assert_eq!(text, "記憶裡沒有查到和「不存在的東西」有關的紀錄。");
+        assert!(found.is_empty());
+        assert!(!text.contains(FENCE_OPEN));
+        assert!(!text.contains("觀測輸出"));
+    }
+
+    // The rolling layer's own rows are searchable too, or the model could never
+    // learn the timestamp of a past conversation.
+    #[test]
+    fn past_conversations_are_searchable_as_well_as_past_commands() {
+        let mut turn = mem_row("T1", "turn", "");
+        turn.user = Some("我剛剛說什麼".to_string());
+        turn.assistant = Some("你說要跑測試".to_string());
+        let (text, found) = recall_body(&[turn], "跑測試");
+        assert!(text.contains("T1"));
+        assert!(text.contains("你說要跑測試"));
+        assert_eq!(found, vec!["T1".to_string()]);
+    }
+
+    // A replayed `inject` row is something the user once ordered; it must read as
+    // a record, never as an instruction for right now.
+    #[test]
+    fn recalled_rows_are_fenced_as_observed_output() {
+        let (text, _) = recall_body(&two_rows(), "cyris");
+        let open = text.find(FENCE_OPEN).unwrap();
+        let row = text.find("跑測試").unwrap();
+        let close = text.find(FENCE_CLOSE).unwrap();
+        assert!(open < row && row < close);
+    }
+
+    #[test]
+    fn only_the_newest_rows_survive_the_row_cap() {
+        let rows: Vec<MemoryRow> = (1..=12)
+            .map(|i| {
+                let mut row = mem_row(&format!("T{i:02}"), "inject", "跑測試");
+                row.agent = Some("cyris".to_string());
+                row
+            })
+            .collect();
+        let (text, found) = recall_body(&rows, "cyris");
+        assert_eq!(RECALL_MAX_ROWS, 8);
+        assert_eq!(found.len(), 8);
+        assert_eq!(found.first().unwrap(), "T05");
+        assert_eq!(found.last().unwrap(), "T12");
+        for old in ["T01", "T02", "T03", "T04"] {
+            assert!(!found.contains(&old.to_string()));
+            assert!(!text.contains(old));
+        }
+    }
+
+    // Over the character ceiling, whole rows go — half a row would cut the very
+    // timestamp a later write has to quote.
+    #[test]
+    fn the_character_ceiling_drops_whole_rows_from_the_oldest_end() {
+        let rows: Vec<MemoryRow> = (1..=6)
+            .map(|i| {
+                let mut row = mem_row(
+                    &format!("T{i}"),
+                    "inject",
+                    &format!("第{i}次 {}", "跑測試".repeat(30)),
+                );
+                row.agent = Some("cyris".to_string());
+                row
+            })
+            .collect();
+        assert!(rows.len() < RECALL_MAX_ROWS);
+        let (text, found) = recall_body(&rows, "cyris");
+        assert!(found.len() < rows.len());
+        assert!(!found.contains(&"T1".to_string()));
+        assert!(!text.contains("第1次"));
+        assert!(found.contains(&"T6".to_string()));
+        let body = text
+            .split(FENCE_OPEN)
+            .nth(1)
+            .unwrap()
+            .split(FENCE_CLOSE)
+            .next()
+            .unwrap()
+            .trim();
+        assert!(body.chars().count() <= RECALL_MAX_CHARS);
+    }
+
+    #[test]
+    fn one_long_row_keeps_its_head_and_its_timestamp() {
+        let mut row = mem_row("T1", "inject", &"字".repeat(300));
+        row.agent = Some("cyris".to_string());
+        let (text, found) = recall_body(&[row], "cyris");
+        assert_eq!(RECALL_ROW_MAX_CHARS, 120);
+        assert!(text.contains(&format!("{}…", "字".repeat(120))));
+        assert!(!text.contains(&"字".repeat(121)));
+        let line = text
+            .lines()
+            .find(|line| line.contains('…'))
+            .expect("the truncated row is one line");
+        assert!(line.starts_with("T1 "));
+        assert!(line.ends_with('…'));
+        assert_eq!(found, vec!["T1".to_string()]);
     }
 
     #[test]

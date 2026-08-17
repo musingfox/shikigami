@@ -7,8 +7,9 @@
 //!   `DEPTH_MAX_CHARS` across all of them.
 //! - **rolling** — `HISTORY_DEPTH` turns, each fitted to `TURN_MAX_*`, plus the
 //!   curated file capped at `CURATED_MAX_CHARS`.
-//! - **on demand** — what a tool fetched: `SCREEN_MAX_*` per `read_pane`. It lives
-//!   for the turn that fetched it and is never written back into the rolling layer.
+//! - **on demand** — what a tool fetched: `SCREEN_MAX_*` per `read_pane`,
+//!   `RECALL_*` per `recall`. It lives for the turn that fetched it and is never
+//!   written back into the rolling layer.
 //!
 //! `ROTATE_MAX_BYTES` is the odd one out — it bounds the file on disk, not the
 //! prompt. It sits here because it is the same kind of decision, deliberately soft:
@@ -37,6 +38,16 @@ pub const DEPTH_MAX_CHARS: usize = 2000;
 /// used before it moved to a tool, so the model pays the same either way.
 pub const SCREEN_MAX_LINES: usize = 12;
 pub const SCREEN_MAX_CHARS: usize = 600;
+
+/// On demand: one `recall` answer. How many rows may come back, how much free
+/// text one row may spend, and the ceiling on all of them together. Over the
+/// ceiling, whole rows are dropped from the oldest end — never half a row, or
+/// the timestamp a later write has to quote would be the part that got cut.
+/// Counted over the rendered rows only: the fence around them is the app's own
+/// words, exactly as `SCREEN_MAX_CHARS` bounds the excerpt and not its fence.
+pub const RECALL_MAX_ROWS: usize = 8;
+pub const RECALL_ROW_MAX_CHARS: usize = 120;
+pub const RECALL_MAX_CHARS: usize = 600;
 
 /// On disk, not in the prompt: rotate `memory.jsonl` past this, keeping one
 /// generation.
