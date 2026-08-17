@@ -213,6 +213,18 @@ The fast path stops paying (increment 2, 2026-08-17):
 - **`budget.rs` is the one page** of context budgets, grouped by the four layers.
   `AgentDepth::screen` is kept though nothing populates it: `render_roster` still
   renders it, and that is the slot an event-driven turn would fill
+- **Accepted cost — openai and anthropic users are degraded until they get native
+  tool-use** (decided 2026-08-17). `backend_text::tools()` returns `[]`, so
+  `read_pane` is never declared to them; deleting the prefetch removed their only
+  screen source, so on a cold start (no hook line yet, or one of R-observe's 3.4% of
+  lines with content but no pane) they now say 不知道 where they used to say
+  「從畫面看到…」. Prompt answer-rule (2) and `render_roster`'s `畫面節錄` branch are
+  consequently dead on every path today. This **breaks increment 1's "other providers
+  behave as today"** and was not noticed there. Not fixed with a conditional prefetch:
+  that re-adds the path this increment deleted and would be deleted again the moment
+  those providers get tools — which is already the roadmap (grok → openai →
+  anthropic). Cheapest-first picks gemini whenever a gemini key exists, so the
+  degraded case is a single-provider openai/anthropic install
 - Known gap, **not** caused here: `dai_live`'s "no source → must say 不知道" assertion
   is flaky against the live model (~1 in 5). That path declares no tools and its
   request builder is key-for-key identical to `404f40c`'s, so nothing here caused
