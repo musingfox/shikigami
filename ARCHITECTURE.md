@@ -51,8 +51,15 @@ own state, on disk so it survives a restart. Three layers, two files under
   1 MiB keeping one generation. **The fact layer is machine-written**: every row
   comes from data already present after the user's confirm — no model call, no
   extraction, and a field that isn't known is omitted rather than guessed.
-- `MEMORY.md` — hand-written by the user, injected into every system prompt as
-  trusted text. Absent / blank / unreadable leaves the prompt byte-identical.
+- `MEMORY.md` — the curated layer, injected into every system prompt. Written by
+  the user **and**, since the `memory` tool, by the model — so trust is decided
+  **per line**, not per file: a line the model wrote carries an audit prefix and
+  is injected inside the observation fence, marked as unconfirmed; every other
+  line stays the user's own words and keeps its unfenced, trusted block. The
+  model can only append (there is no rewrite path, so the user's text cannot be
+  overwritten), and a write that would cross `budget::CURATED_MAX_CHARS` is
+  refused rather than truncating anything. Absent / blank / unreadable — or
+  present with no model-written line — leaves the prompt byte-identical.
 
 Only `turn` rows reach the model on their own, as the rolling layer. Every row —
 `turn`, `inject` and `summon` alike, across both generations — is searchable by

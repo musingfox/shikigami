@@ -71,17 +71,22 @@ summoned; this app is how you hear from and speak to them.
 
 ## Current state (2026-08-17)
 
-**R0–R2, R-observe, R-memory and R-tool-loop increment 1 are built and
+**R0–R2, R-observe, R-memory and R-tool-loop increments 1–3 are built and
 verified.** Both channels are closed loops: it tells you what each agent is doing
 *and why it is stuck*, and you can talk back to a named agent or summon a new one
-— each behind a confirm. It remembers across a restart. And it can now *look
-something up and then answer* — a real multi-step tool-use loop, verified live.
+— each behind a confirm. It remembers across a restart. It can *look something up
+and then answer* — a real multi-step tool-use loop, verified live. And since
+increment 3 it **owns** that memory rather than only being fed it: it searches
+the whole JSONL with `recall`, and writes into `MEMORY.md` with `memory` — but
+only ever appending, only with a source timestamp that is checked against what is
+actually on disk, and its lines are fenced and marked unconfirmed so they can
+never pass as yours.
 
 What it still is **not**: an agent that acts on its own. **Nothing wakes it but
-your voice** (`r-brain-event-driven`), and it still cannot search its own memory
-or write to it — `recall`, the curated-layer `memory` writer and `/context` are
-increments 3–4 of `r-brain-tool-loop`, still open. (Increment 2 landed the same
-day: an utterance no longer costs a pane read.)
+your voice** (`r-brain-event-driven`). The one piece of `r-brain-tool-loop` still
+open is increment 4, `/context` — so today nothing tells you what a turn's
+context actually costs, layer by layer. (Increment 2 landed the same day as 1:
+an utterance no longer costs a pane read.)
 
 Shell and voice Q&A:
 
@@ -149,17 +154,23 @@ Memory that survives a restart (R-memory, 2026-08-17):
 - **`memory.rs`** — three layers, two files under `config::config_dir()`
   (`~/.config/shikigami/`, created once at startup):
   **conversation** (last 6 turns, replacing the old in-process `Mutex`),
-  **fact** (append-only action log), **curated** (`MEMORY.md`, hand-written)
+  **fact** (append-only action log), **curated** (`MEMORY.md`, hand-written —
+  **and model-appended since increment 3**, see below)
 - **The fact layer is machine-written, never model-written.** Each confirmed
   inject / summon writes one row from data already at hand — no model call, no
   extraction from transcripts; an unknown field (e.g. an agent name the live
   roster can't confirm) is **omitted, never guessed**. R-observe proved this
   brain invents sources when it has none; the fact layer is designed so it has
   nothing to invent. Fact rows never enter the prompt — they await R-tool-loop's
-  `recall`
+  `recall`. **Landed 2026-08-17 (increment 3):** they are still never *injected*,
+  but `recall` can now fetch them on demand
 - `MEMORY.md` is injected into every prompt as **trusted** text (no observation
   fence — that fence exists so agent output can't read as instruction, and this
-  file is the user's own words). Absent / blank / unreadable → prompt byte-identical
+  file is the user's own words). Absent / blank / unreadable → prompt byte-identical.
+  **Superseded 2026-08-17 (increment 3):** "the user's own words" stopped being
+  true of the whole file the moment the model could write to it, so trust is now
+  decided **per line** — see the increment 3 record below. The byte-identical
+  guarantee survives, and now also covers a file that has no model-written line
 - `memory.jsonl` rotates at 1 MiB keeping one generation. A **failed** rotation
   logs and still appends: memory continuity beats a hard bound, so the cap is
   soft in that case, deliberately
@@ -167,7 +178,9 @@ Memory that survives a restart (R-memory, 2026-08-17):
   Not a profile mechanism: it moves `models/` and `hooks.ndjson` while
   `scripts/cc-hook.sh` still writes the real path, silently killing channel ①
 - Not done here, by design: `recall` / tool-use loop / model-written curated
-  memory (`r-brain-tool-loop`), heartbeat (`r-brain-event-driven`), UI surfacing
+  memory (`r-brain-tool-loop`), heartbeat (`r-brain-event-driven`), UI surfacing.
+  **All three of the first group have since landed** (increments 1–3); heartbeat
+  and UI surfacing are still open
 
 The loop that makes it an agent (R-tool-loop increment 1, 2026-08-17):
 
@@ -234,6 +247,59 @@ The fast path stops paying (increment 2, 2026-08-17):
   write **because R-observe proved this brain invents sources**. That guardrail is
   only as good as this invariant, so until the ticket has numbers, treat it as
   *probably* effective
+
+It remembers what you tell it to (R-tool-loop increment 3, 2026-08-17):
+
+- **`recall(query)`** searches every row of the fact layer — `turn`, `inject` and
+  `summon` alike — **across both generations** (`memory.jsonl` and
+  `memory.jsonl.1`; reading only the current file would go silently amnesiac the
+  moment rotation fires). Each row carries its own ts verbatim, because that ts is
+  what the `memory` guardrail below consumes. Results are fenced as observed
+  output — an `inject` row is a command the user once gave, and replayed into a
+  prompt it must read as *record*, not as *do this now*. Budgets
+  (`RECALL_MAX_ROWS` / `RECALL_ROW_MAX_CHARS` / `RECALL_MAX_CHARS`) live in
+  `budget.rs` with the rest of the on-demand layer, and nothing recalled is
+  written back to the rolling layer — same rule, same test shape as `read_pane`
+- **`memory(text, source)`** appends to the curated layer, behind four guardrails,
+  three of which are structural rather than prompt policy:
+  1. **source check** — the ts the model names is compared against the ts set
+     actually on disk; no match, no write. This is the R-observe defect's third
+     appearance and the third time it had to be closed by construction
+  2. **audit line** — every model line is `- 式神 <寫入 ts>（來源 <來源 ts>）：<text>`,
+     so the file itself says who wrote what, when, and on what basis
+  3. **hard cap** — a write that would cross `budget::CURATED_MAX_CHARS` is
+     **refused** and the model is told to ask the user to consolidate. The *read*
+     path is untouched: it still only warns and never truncates, because silently
+     dropping the user's own words remains worse than a long prompt. One constant,
+     two deliberately different meanings, both written into its comment
+  4. **append-only** — there is no rewrite path at all, so "the user's hand-edits
+     cannot be overwritten" is a property of the code shape, not of getting a
+     block parser right. Cost, accepted: the model can never consolidate or fix
+     its own earlier lines
+- **Trust is now per line, not per file** (the one High decision at this ticket's
+  gate). `MEMORY.md` splits on the audit prefix: unmarked lines keep today's
+  unfenced trusted block, marked lines get their own block inside the observation
+  fence, labelled 未經使用者確認. **Fail-closed**: a user line that happens to look
+  like the prefix gets *demoted*; no model line can ever be promoted. With no model
+  line in the file the prompt is byte-identical to before — asserted, not assumed
+- **The `Rejected` replay finally has a live receipt.** Increment 1's `ponytail:`
+  note — that a rejected tool call's reason riding a real `functionResponse` back
+  to gemini had only fake receipts — is now an `#[ignore]` live case. Its residual
+  gap is stated in the comment rather than papered over: it exercises *declared but
+  unrunnable*, **not** a name the model hallucinated. Same distinction `vdp_t2`
+  taught, written down this time instead of discovered later
+- **Known boundary of guardrail 1** (found in review, not by a test): the source
+  check proves *that row exists*, not *that this sentence came from it*. A model
+  fresh from a `recall` holds a fistful of real ts values and can attach any of
+  them to anything. It closes "invent a timestamp"; it does not close "let a real
+  timestamp vouch for invented content". The audit line is what makes that
+  auditable after the fact — every line can be taken back to `recall` and checked
+- Smaller things left honest rather than fixed: `curated_split` uses `str::lines()`,
+  so a **CRLF** `MEMORY.md` loses its `\r` and the byte-identical clause is
+  literally false for it (semantically identical); the cap check and the append are
+  not one atomic action, so two overlapping voice turns could reach cap + one line
+  (append-only bounds the overflow, nothing is lost); and the fence wording still
+  says 「這個 agent 的輸出」 while now also wrapping recalled memory
 
 ## Architecture
 
@@ -325,7 +391,12 @@ provider: `ANTHROPIC_API_KEY=… cargo test sap9_live -- --ignored --nocapture`.
 The tool loop has its own, and it needs herdr up with at least one live agent:
 `GEMINI_API_KEY=… cargo test gemini_live -- --ignored --nocapture` — it prints the
 whole turn, so you can read whether step 1 really returned a `functionCall` and
-step 2 really answered from the pane. They relocate the config root to a temp dir,
+step 2 really answered from the pane. Increment 3 added one that needs **no herdr
+at all**, only a gemini key — `GEMINI_API_KEY=… cargo test undeclared_tool_live --
+--ignored --nocapture` — it prints the declared tool names, step 1's raw response,
+the parsed `Rejected` reason, and the `contents` step 2 actually sent, so you can
+read for yourself that the `functionResponse` replay happened and the turn still
+finished. They relocate the config root to a temp dir,
 so they no longer touch your real `memory.jsonl` — the key **file** is carried
 over, so `~/.config/shikigami/` keys keep working too. `cargo test` alone can
 never prove live behaviour; that is exactly how R-observe's "the brain invents a
@@ -368,7 +439,7 @@ speak to N, then breadth. Avatar/Linux are off the critical path.
   never bulk-injected. Storage is format-stable across the still-open loop
   question, which is why this shipped without it. Ticket
   `r-brain-durable-memory`; follow-ups in `memory-read-and-durability-polish`.
-- **R-tool-loop — the loop that makes it an agent** — **increments 1 and 2 DONE
+- **R-tool-loop — the loop that makes it an agent** — **increments 1, 2 and 3 DONE
   2026-08-17**, split into four at the interface boundary (a human call: 11
   criteria over 5 files was too much for one review). Increment 1: the `Backend`
   port + two adapters, the 5-step/45s loop, gemini native function calling,
@@ -376,9 +447,12 @@ speak to N, then breadth. Avatar/Linux are off the critical path.
   forward because a loop whose only tools are terminal can never take a second
   step, so criterion 4 would have had no real receipt. Increment 2: the screen half
   off the prefetch path (an utterance now costs zero pane reads), every context
-  budget in `budget.rs`, and the no-write-back proof. Still open: **increment 3**
-  `recall` + the `memory` curated writer and its four guardrails; **increment 4**
-  `/context`. Findings worth keeping:
+  budget in `budget.rs`, and the no-write-back proof. Increment 3: `recall` over
+  both JSONL generations, the `memory` curated writer and its four guardrails, and
+  **per-line trust in `MEMORY.md`** — because "this file is the user's own words"
+  was the *only* reason the curated layer was ever injected unfenced, and the model
+  writing to it killed that reason. Still open: **increment 4** `/context`.
+  Findings worth keeping:
   `thinkingBudget: 0` does **not** break gemini-2.5-flash function calling
   (live-verified — no offline test could have said either way), and **R-observe's
   invented-source defect grew back in the new code** as "a failed pane read still
@@ -388,7 +462,10 @@ speak to N, then breadth. Avatar/Linux are off the critical path.
   `vdp_t2` had been standing in as the pane-id join's receipt while only ever
   exercising the screen excerpt, and deleting that half is what revealed the hook
   half was unchecked — the archived ticket said so in writing and it still read as
-  covered. Ticket
+  covered. And a fourth, from increment 3: **guarding the source is not the same as
+  guarding the claim** — the write guardrail checks that the named ts exists, which
+  closes "invent a timestamp" but not "let a real timestamp vouch for invented
+  content"; the audit line is what keeps the second case findable afterwards. Ticket
   `r-brain-tool-loop`.
 - **R-event-driven — it wakes on the world, not only on you** (2026-08-16):
   hooks events reach the brain's judgement, with a silence-by-default rule and a
