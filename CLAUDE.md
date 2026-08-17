@@ -16,8 +16,18 @@ owns work without a pane you can take over. R2d's summon boundary and the
 `claude -p` / Agent SDK / ACP-spawn ban both hang off this rule — "shikigami
 is an agent" is not a licence to spawn.
 
-Which engine the brain runs on is **open**, see
-`pm/shikigami/docs/core-brain-open-question.md` (2026-08-10).
+Which engine the brain runs on was settled **2026-08-17: build it here**, not
+adopt Hermes / OpenClaw / OpenAB — see `pm/shikigami/docs/core-brain-open-question.md`
+(now CLOSED) and the evidence in `pm/shikigami/docs/resident-agent-survey.md`.
+Both candidates *can* be driven programmatically (OpenAI-compatible endpoints,
+built-in tools disableable), so the decision rested elsewhere: the sub-second
+dispatch path has no published latency figures and OpenClaw has no documented
+way to skip its per-run prompt assembly; adopting drags in a Python or Node
+runtime where today there is none; and confirm-before-inject would move its
+enforcement point into a program that doesn't know the rule exists. **The
+untested crux, if this is ever reopened**: does a `tools` array POSTed to their
+`/v1/chat/completions` come back as `tool_calls`? If not, confirm-gated inject
+cannot be expressed through an external brain at all.
 
 ### Two axes — 1:1:N only describes the first
 
@@ -59,11 +69,17 @@ summoned; this app is how you hear from and speak to them.
                             (R2a-d, 2026-07-26/08-12) — confirm before both
 ```
 
-## Current state (2026-08-16)
+## Current state (2026-08-17)
 
-**R0–R2 and R-observe are built, verified, and on `main`.** Both channels are
+**R0–R2, R-observe and R-memory are built and verified.** Both channels are
 closed loops: it tells you what each agent is doing *and why it is stuck*, and
 you can talk back to a named agent or summon a new one — each behind a confirm.
+And it now remembers across a restart.
+
+What it still is **not**: an agent that acts on its own. There is no tool-use
+loop (single-shot completion + a hand-rolled JSON action), so it can answer but
+cannot *look something up and then answer*; and nothing wakes it but your voice.
+Those are `r-brain-tool-loop` and `r-brain-event-driven`.
 
 Shell and voice Q&A:
 
@@ -93,7 +109,7 @@ Seeing and speaking to N (R1/R2, 2026-07-23 → 08-12):
   `agent.prompt`. **Voice summon** (R2d): confirm → herdr tab → type `claude`
   in the pane → brief it. Never `agent.start` — see the summon note below
 - Brain has the live roster in its system prompt + 6 turns of memory
-  (in-process only — durability is R-memory)
+  (durable since R-memory, 2026-08-17 — see below)
 
 Depth of observation (R-observe, 2026-08-16, `main` @ `f352e16`):
 
@@ -110,6 +126,31 @@ Depth of observation (R-observe, 2026-08-16, `main` @ `f352e16`):
   archived ticket's "未收齊的收據"
 - `AgentEntry` and `events.ts` deliberately untouched: depth reaches the brain
   only. Showing it in the UI is a separate, unopened ticket
+
+Memory that survives a restart (R-memory, 2026-08-17):
+
+- **`memory.rs`** — three layers, two files under `config::config_dir()`
+  (`~/.config/shikigami/`, created once at startup):
+  **conversation** (last 6 turns, replacing the old in-process `Mutex`),
+  **fact** (append-only action log), **curated** (`MEMORY.md`, hand-written)
+- **The fact layer is machine-written, never model-written.** Each confirmed
+  inject / summon writes one row from data already at hand — no model call, no
+  extraction from transcripts; an unknown field (e.g. an agent name the live
+  roster can't confirm) is **omitted, never guessed**. R-observe proved this
+  brain invents sources when it has none; the fact layer is designed so it has
+  nothing to invent. Fact rows never enter the prompt — they await R-tool-loop's
+  `recall`
+- `MEMORY.md` is injected into every prompt as **trusted** text (no observation
+  fence — that fence exists so agent output can't read as instruction, and this
+  file is the user's own words). Absent / blank / unreadable → prompt byte-identical
+- `memory.jsonl` rotates at 1 MiB keeping one generation. A **failed** rotation
+  logs and still appends: memory continuity beats a hard bound, so the cap is
+  soft in that case, deliberately
+- `SHIKIGAMI_CONFIG_DIR` relocates the whole config root (tests + advanced use).
+  Not a profile mechanism: it moves `models/` and `hooks.ndjson` while
+  `scripts/cc-hook.sh` still writes the real path, silently killing channel ①
+- Not done here, by design: `recall` / tool-use loop / model-written curated
+  memory (`r-brain-tool-loop`), heartbeat (`r-brain-event-driven`), UI surfacing
 
 ## Architecture
 
@@ -194,6 +235,13 @@ Manual regression: run demo.sh → avatar mouth moves with audio, bubble types
 out text toward screen center, tray Recent gains the entry, Mute toggle
 creates/removes `~/.config/sumvox/muted`.
 
+Live (`#[ignore]`) tests need a provider key and run against the real herdr /
+provider: `ANTHROPIC_API_KEY=… cargo test sap9_live -- --ignored --nocapture`.
+They relocate the config root to a temp dir, so they no longer touch your real
+`memory.jsonl` — the key **file** is carried over, so `~/.config/shikigami/`
+keys keep working too. `cargo test` alone can never prove live behaviour; that
+is exactly how R-observe's "the brain invents a source" defect got through.
+
 ## Roadmap (R-series, 2026-07-23 — supersedes old M2–M4 numbering)
 
 Ordering logic: identity is the dependency of everything → see N first, then
@@ -220,11 +268,28 @@ speak to N, then breadth. Avatar/Linux are off the critical path.
   prompt forbids it (only a live test caught that — `cargo test` never can),
   and 3.4% of hook lines carry content but no pane, so they can never be
   attributed. Ticket archived at `pm/shikigami/archive/r-observe-depth.md`.
-- **R-memory — memory that survives a restart** (2026-08-10, promoted out of
-  R2's tail): brain history is 6 turns in a process `Mutex`, gone on restart.
-  JARVIS needs yesterday's assignments, not the last six lines. Independent of
-  model tier — a better model does not produce memory. Ticket
-  `r-brain-durable-memory`.
+- **R-memory — memory that survives a restart** — **DONE 2026-08-17**. The
+  premise held: durability was never about model tier. What the build actually
+  settled is *where memory comes from* — **the fact layer is machine-written**
+  (every row from data already present after a confirm), because a model-written
+  log reintroduces exactly the invention R-observe closed. Survey of Hermes /
+  OpenClaw (`resident-agent-survey`) added the second half: memory is **two
+  tiers** — small curated always-injected, plus episodic that is search-only and
+  never bulk-injected. Storage is format-stable across the still-open loop
+  question, which is why this shipped without it. Ticket
+  `r-brain-durable-memory`; follow-ups in `memory-read-and-durability-polish`.
+- **R-tool-loop — the loop that makes it an agent** (2026-08-16): today's brain
+  is single-shot with a hand-parsed JSON action and **no `tools` field at all**;
+  context is assembled for it, not by it. Add a real tool-use loop behind one
+  backend interface (provider formats stay in adapters), gemini first, then
+  grok → openai → anthropic. Brings `recall` (the fact layer's reader),
+  `read_pane` (moving depth from prefetch to on-demand, so the fast path stops
+  paying for it), and `memory` (model-written curated tier, guarded by a
+  must-cite-a-source rule). Ticket `r-brain-tool-loop`.
+- **R-event-driven — it wakes on the world, not only on you** (2026-08-16):
+  hooks events reach the brain's judgement, with a silence-by-default rule and a
+  heartbeat timer **inside the existing Tauri process** — no gateway daemon;
+  unlike Hermes/OpenClaw we are already resident. Ticket `r-brain-event-driven`.
 - **R-hands — reach the second axis** (2026-08-10, previously absent from the
   roadmap entirely — `bridge`/`MCP` appear 0 times in this repo's code and
   once in this file, under Related repos): an MCP client so the core can

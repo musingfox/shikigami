@@ -33,6 +33,31 @@ Rules that keep the core clean:
    `setSpeaking`, `lipsync(path)`, `toast(text)`. The composition root
    (`src/main.ts`) is the only place events meet presenters.
 
+## Persistent state (memory)
+
+`memory.rs` is **not an adapter** — it faces no outside system; it is the core's
+own state, on disk so it survives a restart. Three layers, two files under
+`config::config_dir()` (`~/.config/shikigami/`):
+
+- `memory.jsonl` — append-only, one JSON object per line, `verb` distinguishes
+  `turn` (conversation) from `inject` / `summon` (the fact layer). Rotates at
+  1 MiB keeping one generation. **The fact layer is machine-written**: every row
+  comes from data already present after the user's confirm — no model call, no
+  extraction, and a field that isn't known is omitted rather than guessed.
+- `MEMORY.md` — hand-written by the user, injected into every system prompt as
+  trusted text. Absent / blank / unreadable leaves the prompt byte-identical.
+
+Only `turn` rows reach the model; fact rows are for a future `recall` tool.
+
+`SHIKIGAMI_CONFIG_DIR` relocates that whole root (tests, and advanced use). It
+moves `models/` and `hooks.ndjson` too, while `scripts/cc-hook.sh` keeps writing
+the real path — so it is not a profile mechanism.
+
+**One deliberate exception to rule 2**: `sumvox::rfc3339_utc` is `pub(crate)` and
+shared with `memory.rs`. It is a pure calendar function carrying none of SumVox's
+format; a second copy would be worse than the borrow. Move it to a neutral module
+if this ever stops being the only exception.
+
 ## Adding a new agent source
 
 Write one Rust module with a `spawn_watcher(app)` (or socket handler) that
