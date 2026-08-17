@@ -5,6 +5,7 @@ mod herdr;
 mod sumvox;
 mod memory;
 mod tray;
+mod backend;
 mod brain;
 mod voice;
 mod stt;

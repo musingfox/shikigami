@@ -4,13 +4,13 @@
 // Client shape (no_proxy + timeout) copied from SumVox — macOS CoreFoundation workaround.
 // ponytail: requests/responses are serde_json::Value, no typed structs per vendor.
 
-use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use crate::backend::Provider;
 use crate::depth::{AgentDepth, PreciseDepth};
 use crate::events::AgentEntry;
 
@@ -91,101 +91,6 @@ fn history_text(action: &SummonAction) -> String {
         SummonAction::Speak(text) => text.clone(),
         SummonAction::Summon { project, task } => format!("（召喚 {}：{}）", project, task),
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Provider {
-    Gemini,
-    OpenAi,
-    Anthropic,
-}
-
-// cheap-first order for auto-detection
-const PROVIDERS: [Provider; 3] = [Provider::Gemini, Provider::OpenAi, Provider::Anthropic];
-
-impl Provider {
-    fn name(self) -> &'static str {
-        match self {
-            Provider::Gemini => "gemini",
-            Provider::OpenAi => "openai",
-            Provider::Anthropic => "anthropic",
-        }
-    }
-
-    fn model(self) -> &'static str {
-        match self {
-            Provider::Gemini => "gemini-2.5-flash",
-            Provider::OpenAi => "gpt-4.1-mini",
-            Provider::Anthropic => "claude-haiku-4-5",
-        }
-    }
-
-    /// (env var, key file under ~/.config/shikigami/)
-    fn key_sources(self) -> (&'static str, &'static str) {
-        match self {
-            Provider::Gemini => ("GEMINI_API_KEY", "gemini_api_key"),
-            Provider::OpenAi => ("OPENAI_API_KEY", "openai_api_key"),
-            Provider::Anthropic => ("ANTHROPIC_API_KEY", "anthropic_api_key"),
-        }
-    }
-}
-
-pub fn resolve_api_key(
-    provider: Provider,
-    env: Option<&str>,
-    file_content: Option<&str>,
-) -> Result<String, String> {
-    for candidate in [env, file_content].into_iter().flatten() {
-        let t = candidate.trim();
-        if !t.is_empty() {
-            return Ok(t.to_string());
-        }
-    }
-    let (env_var, file_name) = provider.key_sources();
-    Err(format!(
-        "{} API key not found. Set {} env or put key in ~/.config/shikigami/{}.",
-        provider.name(),
-        env_var,
-        file_name
-    ))
-}
-
-fn load_key(provider: Provider) -> Result<String, String> {
-    let (env_var, file_name) = provider.key_sources();
-    let env = std::env::var(env_var).ok();
-    let file = fs::read_to_string(crate::config::config_dir().join(file_name)).ok();
-    resolve_api_key(provider, env.as_deref(), file.as_deref())
-}
-
-/// Pure selection logic: explicit override wins, else first provider (cheap-first)
-/// whose key resolves. `available` mirrors PROVIDERS order.
-pub fn pick_provider(explicit: Option<&str>, available: [bool; 3]) -> Result<Provider, String> {
-    if let Some(name) = explicit {
-        let t = name.trim().to_lowercase();
-        if !t.is_empty() {
-            return PROVIDERS
-                .into_iter()
-                .find(|p| p.name() == t)
-                .ok_or_else(|| format!("unknown SHIKIGAMI_BRAIN provider: {} (gemini|openai|anthropic)", t));
-        }
-    }
-    PROVIDERS
-        .into_iter()
-        .zip(available)
-        .find_map(|(p, ok)| ok.then_some(p))
-        .ok_or_else(|| {
-            "no brain API key found. Set one of GEMINI_API_KEY / OPENAI_API_KEY / \
-             ANTHROPIC_API_KEY (env or key file under ~/.config/shikigami/)."
-                .to_string()
-        })
-}
-
-fn detect() -> Result<(Provider, String), String> {
-    let explicit = std::env::var("SHIKIGAMI_BRAIN").ok();
-    let available = PROVIDERS.map(|p| load_key(p).is_ok());
-    let provider = pick_provider(explicit.as_deref(), available)?;
-    let key = load_key(provider)?;
-    Ok((provider, key))
 }
 
 /// Roster snapshot -> a model-readable Chinese text block. Empty roster states
@@ -405,7 +310,7 @@ async fn ask_once(
     depth: &[AgentDepth],
     history: &[(String, String)],
 ) -> Result<String, String> {
-    let (provider, key) = detect()?;
+    let (provider, key) = crate::backend::detect_provider()?;
     let curated = crate::memory::curated_in(&crate::config::config_dir());
     let req = build_request(
         provider,
@@ -457,72 +362,6 @@ async fn ask_once(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ApiKeyResolution tests kept
-    #[test]
-    fn t1_env_takes_precedence() {
-        assert_eq!(
-            resolve_api_key(Provider::Anthropic, Some("sk-env"), Some("sk-file")).unwrap(),
-            "sk-env"
-        );
-    }
-
-    #[test]
-    fn t2_file_trimmed_when_no_env() {
-        assert_eq!(
-            resolve_api_key(Provider::Anthropic, None, Some(" sk-file\n")).unwrap(),
-            "sk-file"
-        );
-    }
-
-    #[test]
-    fn t3_empty_env_falls_to_file() {
-        assert_eq!(
-            resolve_api_key(Provider::Anthropic, Some(""), Some("sk-file")).unwrap(),
-            "sk-file"
-        );
-    }
-
-    #[test]
-    fn t4_missing_both_errors_with_both_locations() {
-        let err = resolve_api_key(Provider::Anthropic, None, None).unwrap_err();
-        assert!(err.contains("ANTHROPIC_API_KEY"));
-        assert!(err.contains("anthropic_api_key"));
-    }
-
-    #[test]
-    fn t4b_gemini_error_names_gemini_sources() {
-        let err = resolve_api_key(Provider::Gemini, None, None).unwrap_err();
-        assert!(err.contains("GEMINI_API_KEY"));
-        assert!(err.contains("gemini_api_key"));
-    }
-
-    // provider selection
-    #[test]
-    fn p1_explicit_override_wins() {
-        let p = pick_provider(Some("anthropic"), [true, true, true]).unwrap();
-        assert_eq!(p, Provider::Anthropic);
-    }
-
-    #[test]
-    fn p2_auto_picks_cheapest_available() {
-        assert_eq!(pick_provider(None, [true, true, true]).unwrap(), Provider::Gemini);
-        assert_eq!(pick_provider(None, [false, true, true]).unwrap(), Provider::OpenAi);
-        assert_eq!(pick_provider(None, [false, false, true]).unwrap(), Provider::Anthropic);
-    }
-
-    #[test]
-    fn p3_no_keys_errors_naming_all_envs() {
-        let err = pick_provider(None, [false, false, false]).unwrap_err();
-        assert!(err.contains("GEMINI_API_KEY"));
-        assert!(err.contains("OPENAI_API_KEY"));
-        assert!(err.contains("ANTHROPIC_API_KEY"));
-    }
-
-    #[test]
-    fn p4_unknown_explicit_errors() {
-        assert!(pick_provider(Some("groq"), [true, true, true]).is_err());
-    }
 
     // BrainReply contract tests (request/response per provider)
     #[test]
@@ -874,45 +713,7 @@ mod tests {
         (u.to_string(), a.to_string())
     }
 
-    /// Carry provider key files into a throwaway config root — and nothing else,
-    /// so memory stays isolated. A missing key file is silent: the env-var form
-    /// is the other half of `load_key` and must keep working on its own.
-    ///
-    /// The copy is chmod 0600 because `temp_dir()` is only private when TMPDIR
-    /// is set (macOS gives a per-user 0700 dir); with it unset Rust falls back
-    /// to a world-readable /tmp, and a real API key would land there at 0644.
-    fn copy_provider_keys(from: &std::path::Path, to: &std::path::Path) {
-        use std::os::unix::fs::PermissionsExt;
-        for provider in PROVIDERS {
-            let (_, file_name) = provider.key_sources();
-            if let Ok(key) = std::fs::read_to_string(from.join(file_name)) {
-                let dest = to.join(file_name);
-                if std::fs::write(&dest, key).is_ok() {
-                    let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn provider_keys_travel_but_memory_does_not() {
-        let real = Tmp::new();
-        let throwaway = Tmp::new();
-        std::fs::write(real.0.join("anthropic_api_key"), "sk-file\n").unwrap();
-        std::fs::write(real.0.join("memory.jsonl"), "{\"role\":\"user\"}\n").unwrap();
-
-        copy_provider_keys(&real.0, &throwaway.0);
-
-        assert_eq!(
-            std::fs::read_to_string(throwaway.0.join("anthropic_api_key")).unwrap(),
-            "sk-file\n"
-        );
-        // the providers without a key file are skipped, not created empty
-        assert!(!throwaway.0.join("gemini_api_key").exists());
-        assert!(!throwaway.0.join("openai_api_key").exists());
-        // isolation intact: memory is never carried over
-        assert!(!throwaway.0.join("memory.jsonl").exists());
-    }
+    use crate::backend::copy_provider_keys;
 
     // ConversationHistoryRetention
     #[test]
