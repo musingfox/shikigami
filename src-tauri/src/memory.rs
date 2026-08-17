@@ -291,6 +291,21 @@ pub(crate) fn curated_write_in(
     Ok(line)
 }
 
+/// The curated file split by who wrote each line: (the user's lines, the model's
+/// lines), each joined back in file order.
+///
+/// Line by line, never by block heading: under append-only the user's later edits
+/// land after the model's lines, so a heading would read their words as the
+/// model's. It is fail-closed — a hand-written line that happens to look like the
+/// marker is demoted to the model block, which only ever costs trust; no model
+/// line can be promoted the other way.
+pub(crate) fn curated_split(text: &str) -> (String, String) {
+    let (model, user): (Vec<&str>, Vec<&str>) = text
+        .lines()
+        .partition(|line| line.trim_start().starts_with(MODEL_LINE_PREFIX));
+    (user.join("\n"), model.join("\n"))
+}
+
 fn curated_warning(chars: usize) -> Option<String> {
     (chars > CURATED_MAX_CHARS).then(|| {
         format!(
@@ -743,6 +758,28 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap(),
             before
+        );
+    }
+
+    // CuratedTrustSplit — authorship is a per-line question, and the whole file
+    // still comes back: every line lands in exactly one of the two halves.
+    #[test]
+    fn the_curated_file_splits_by_line_author_and_loses_nothing() {
+        let line = curated_line("模型記的", "T1", "T2");
+        let text = format!("使用者手寫\n{line}\n使用者後來手寫的一行");
+        let (user, model) = curated_split(&text);
+        assert_eq!(user, "使用者手寫\n使用者後來手寫的一行");
+        assert_eq!(model, line);
+
+        // no model lines at all: the user's half is the file, untouched
+        assert_eq!(
+            curated_split("只有使用者的話"),
+            ("只有使用者的話".to_string(), String::new())
+        );
+        // fail-closed: something that merely looks like a marker is demoted
+        assert_eq!(
+            curated_split("- 式神 假裝是模型寫的"),
+            (String::new(), "- 式神 假裝是模型寫的".to_string())
         );
     }
 

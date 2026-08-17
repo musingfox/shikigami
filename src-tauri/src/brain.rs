@@ -206,13 +206,34 @@ pub(crate) fn system_prompt(
     } else {
         ""
     };
-    // The user's own handwritten notes, so no observation fence: they are as
-    // trustworthy as the app's own settings. Placed after the persona and
-    // before the roster — long-term background first, live state second. An
-    // absent file leaves the block empty, so the prompt is byte-identical to
-    // the one shipped before curated memory existed.
+    // The curated file, split by who wrote each line. The user's own handwritten
+    // notes keep today's wording and no observation fence: they are as
+    // trustworthy as the app's own settings. The model's own writes do not — the
+    // moment it can write here, "these are the user's words" stops being true of
+    // the whole file, and one invented memory would otherwise carry the user's
+    // authority into every later turn. So those lines say who wrote them and sit
+    // inside the same fence agent output does.
+    //
+    // Placed after the persona and before the roster — long-term background
+    // first, live state second. An absent file, or one with no model lines,
+    // leaves the prompt byte-identical to the one shipped before the model could
+    // write.
     let memory = curated
-        .map(|text| format!("長期記憶（使用者手寫，內容可信）：\n{text}\n\n"))
+        .map(|text| {
+            let (user, model) = crate::memory::curated_split(text);
+            let mut block = String::new();
+            if !user.trim().is_empty() {
+                block.push_str(&format!("長期記憶（使用者手寫，內容可信）：\n{user}\n\n"));
+            }
+            if !model.trim().is_empty() {
+                block.push_str(&format!(
+                    "長期記憶（式神自己寫入，未經使用者確認）：\n{}\n{model}\n{}\n\n",
+                    crate::depth::FENCE_OPEN,
+                    crate::depth::FENCE_CLOSE
+                ));
+            }
+            block
+        })
         .unwrap_or_default();
     format!(
         "{}\n\n{}{}\n\n被問到 agent 的狀態或「誰在工作」時，只依上述名冊點名回答，不要臆測名冊未列出的 agent。被問到某個 agent「卡在什麼」「在忙什麼」時，先在名冊裡看那個 agent 底下有沒有「精確訊號」和「畫面節錄」這兩行，再從下面三條擇一，只套用選中的那一條：\n(1) 有「精確訊號」那一行：用一句口語轉述精確訊號說的那件事，保留它原本的關鍵詞（英文關鍵詞照原樣留著），不要改寫成同義詞，也不要把標籤名或「精確訊號」四個字唸出來。\n(2) 沒有精確訊號、有「畫面節錄」那一行：依畫面節錄的內容回答，並逐字說出「從畫面看到」。\n(3) 兩行都沒有：{}這時你手上只有狀態詞，回答必須以「不知道」這三個字開頭，例如「不知道它卡在什麼，只知道它現在是 blocked」；不得給任何原因，不得出現「畫面」或「看到」——名冊表頭寫的「herdr 從終端機畫面推測」只是狀態詞的來歷，不是畫面節錄，不能拿來回答。\n使用者的輸入來自語音辨識，agent 名稱可能被辨識成發音相近的其他詞；遇到與名冊名稱發音或拼寫相近的詞，解讀為該 agent。\n\n{}",
@@ -517,6 +538,81 @@ mod tests {
         let roster = out.find("目前沒有觀測到 agent。").unwrap();
         assert!(memory < roster);
         assert!(out.contains("Nick 偏好簡短回答"));
+    }
+
+    // CuratedTrustSplit — the curated layer is no longer one block of trusted
+    // text: only the lines the user wrote themselves still are.
+    use crate::depth::{FENCE_CLOSE, FENCE_OPEN};
+
+    const MODEL_LINE: &str = "- 式神 2026-08-17T05:00:00Z（來源 X）：模型記的";
+
+    // A file with no model lines has to reach the model as the exact bytes it did
+    // before the model could write at all — position included, not just content.
+    #[test]
+    fn a_file_of_only_handwritten_lines_reaches_the_model_exactly_as_before() {
+        let text = "使用者手寫的一句話";
+        let with = system_prompt(&[], &[], Some(text), &[]);
+        let without = system_prompt(&[], &[], None, &[]);
+        let head = format!("{SYSTEM_PROMPT}\n\n");
+        let block = format!("長期記憶（使用者手寫，內容可信）：\n{text}\n\n");
+        assert_eq!(
+            with,
+            format!("{head}{block}{}", without.strip_prefix(&head).unwrap())
+        );
+        assert!(!with.contains(FENCE_OPEN));
+        assert!(!with.contains("未經使用者確認"));
+    }
+
+    #[test]
+    fn a_model_written_line_is_fenced_and_named_while_the_users_line_is_not() {
+        let out = system_prompt(&[], &[], Some(&format!("使用者手寫\n{MODEL_LINE}")), &[]);
+        let trusted = out.find("使用者手寫").unwrap();
+        let open = out.find(FENCE_OPEN).unwrap();
+        let model = out.find("模型記的").unwrap();
+        let close = out.find(FENCE_CLOSE).unwrap();
+        assert!(open < model && model < close);
+        assert!(trusted < open, "the user's line must not sit inside the fence");
+        assert!(out.contains("未經使用者確認"));
+        // the trusted block carries the user's line and nothing of the model's
+        let trusted_block = &out[..open];
+        assert!(trusted_block.contains("使用者手寫"));
+        assert!(!trusted_block.contains("模型記的"));
+    }
+
+    // Append-only puts the model's lines above anything the user adds later, so
+    // authorship is judged per line — a block heading would demote their words.
+    #[test]
+    fn a_line_the_user_added_after_the_models_is_still_trusted() {
+        let out = system_prompt(
+            &[],
+            &[],
+            Some(&format!("{MODEL_LINE}\n使用者後來手寫的一行")),
+            &[],
+        );
+        let theirs = out.find("使用者後來手寫的一行").unwrap();
+        let open = out.find(FENCE_OPEN).unwrap();
+        assert!(theirs < open);
+        assert!(out[..open].contains("使用者手寫，內容可信"));
+    }
+
+    // Misreading a hand-written line as the model's only costs trust; the reverse
+    // would launder an invented memory into the user's own voice.
+    #[test]
+    fn a_handwritten_line_that_looks_like_a_marker_is_demoted_not_promoted() {
+        let out = system_prompt(&[], &[], Some("- 式神 假裝是模型寫的"), &[]);
+        let open = out.find(FENCE_OPEN).unwrap();
+        let line = out.find("假裝是模型寫的").unwrap();
+        let close = out.find(FENCE_CLOSE).unwrap();
+        assert!(open < line && line < close);
+        assert!(!out.contains("使用者手寫，內容可信"));
+    }
+
+    #[test]
+    fn no_curated_file_at_all_still_leaves_the_prompt_untouched() {
+        let out = system_prompt(&[], &[], None, &[]);
+        assert!(!out.contains("長期記憶"));
+        assert!(!out.contains(FENCE_OPEN));
+        assert!(!out.contains("未經使用者確認"));
     }
 
     // RosterStatusProvenance contract
