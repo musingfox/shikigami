@@ -223,6 +223,21 @@ pub(crate) fn curated_line(text: &str, source: &str, now_ts: &str) -> String {
     )
 }
 
+/// Guardrail 3: the curated layer has a ceiling, and reaching it is loud. A write
+/// that would carry the file past `CURATED_MAX_CHARS` is refused whole — never
+/// trimmed to fit, because under append-only trimming means rewriting lines that
+/// may be the user's own. Counted on the raw file, so an existing file the user
+/// pushed over the ceiling themselves simply admits no more model writes.
+pub(crate) fn curated_cap_ok(existing: &str, line: &str) -> Result<(), String> {
+    let have = existing.chars().count();
+    if have + line.chars().count() <= CURATED_MAX_CHARS {
+        return Ok(());
+    }
+    Err(format!(
+        "長期記憶已滿，這一條沒有寫進去：MEMORY.md 目前 {have} 字元，加上這一行會超過上限 {CURATED_MAX_CHARS} 字元。請使用者自己整併 MEMORY.md，我不會改動既有內容。"
+    ))
+}
+
 fn curated_warning(chars: usize) -> Option<String> {
     (chars > CURATED_MAX_CHARS).then(|| {
         format!(
@@ -507,6 +522,82 @@ mod tests {
         let line = curated_line("第一行\n第二行", "T1", "T2");
         assert_eq!(line.lines().count(), 1);
         assert_eq!(line, "- 式神 T2（來源 T1）：第一行 第二行");
+    }
+
+    // CuratedWriteCap — guardrail 3. The file never grows silently, and nothing
+    // already in it is ever cut to make room.
+    //
+    // The production write path lands with CuratedAppendOnly; this composes the
+    // three pure guardrails with a plain test append so the "a refusal leaves the
+    // file byte-identical" half has a receipt here too.
+    fn plan_and_write(dir: &Path, known: &[String], text: &str, source: &str) -> Result<String, String> {
+        let path = dir.join("MEMORY.md");
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        curated_source_ok(known, text, source)?;
+        let line = curated_line(text, source, "2026-08-17T05:00:00Z");
+        curated_cap_ok(&existing, &line)?;
+        std::fs::write(&path, format!("{existing}{line}\n")).unwrap();
+        Ok(line)
+    }
+
+    #[test]
+    fn a_write_that_would_pass_the_ceiling_is_refused_naming_both_numbers() {
+        let existing = "記".repeat(3990);
+        let line = "字".repeat(50);
+        let reason = curated_cap_ok(&existing, &line).unwrap_err();
+        assert_eq!(CURATED_MAX_CHARS, 4000);
+        assert!(reason.contains("4000"));
+        assert!(reason.contains("3990"));
+        assert!(reason.contains("整併"));
+    }
+
+    #[test]
+    fn a_write_with_room_left_is_accepted() {
+        assert_eq!(
+            curated_cap_ok(&"記".repeat(100), &"字".repeat(50)),
+            Ok(())
+        );
+    }
+
+    // The read path only warns, so the user can put the file over the ceiling
+    // themselves. From then on no model write fits — and their words stay put.
+    #[test]
+    fn an_already_oversized_file_admits_no_write_and_loses_nothing() {
+        let tmp = Tmp::new();
+        let theirs = "記".repeat(5000);
+        std::fs::write(tmp.0.join("MEMORY.md"), &theirs).unwrap();
+        let reason = plan_and_write(&tmp.0, &known(), "使用者偏好 rebase", "2026-08-16T09:12:03Z")
+            .unwrap_err();
+        assert!(reason.contains("5000"));
+        assert!(reason.contains("4000"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap(),
+            theirs
+        );
+        assert_eq!(curated_in(&tmp.0).unwrap().chars().count(), 5000);
+    }
+
+    #[test]
+    fn a_refused_write_leaves_not_half_a_line_behind() {
+        let tmp = Tmp::new();
+        let before = format!("{}\n", "記".repeat(3990));
+        std::fs::write(tmp.0.join("MEMORY.md"), &before).unwrap();
+        assert!(plan_and_write(&tmp.0, &known(), &"字".repeat(50), "2026-08-16T09:12:03Z").is_err());
+        assert_eq!(
+            std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap(),
+            before
+        );
+
+        // and a write that does fit really does land, so the refusal above is the
+        // cap talking and not a helper that never writes
+        let small = Tmp::new();
+        std::fs::write(small.0.join("MEMORY.md"), "使用者的話\n").unwrap();
+        let line = plan_and_write(&small.0, &known(), "使用者偏好 rebase", "2026-08-16T09:12:03Z")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(small.0.join("MEMORY.md")).unwrap(),
+            format!("使用者的話\n{line}\n")
+        );
     }
 
     #[test]

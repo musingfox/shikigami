@@ -23,8 +23,13 @@ pub const HISTORY_DEPTH: usize = 6;
 /// Rolling layer: one turn row, before it is stored or replayed.
 pub const TURN_MAX_LINES: usize = 8;
 pub const TURN_MAX_CHARS: usize = 400;
-/// Curated layer: `MEMORY.md`. Advisory — over this we warn and never truncate,
-/// because silently dropping the user's own words is worse than a long prompt.
+/// Curated layer: `MEMORY.md`. One number, two meanings, deliberately:
+/// - **reading** it is advisory — over this we warn and never truncate, because
+///   silently dropping the user's own words is worse than a long prompt;
+/// - **writing** it is hard — a model write that would carry the file past this
+///   is refused outright and the model is told to ask the user to consolidate.
+///   Refusing is the only option compatible with append-only: trimming to fit
+///   would mean rewriting lines the user may have written themselves.
 pub const CURATED_MAX_CHARS: usize = 4000;
 
 /// Rebuilt each turn: one agent's precise hook signal (label and detail each).
