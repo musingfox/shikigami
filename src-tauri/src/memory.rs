@@ -7,11 +7,11 @@ use serde::Serialize;
 use crate::events::AgentEntry;
 
 
-pub const HISTORY_DEPTH: usize = 6;
-pub const TURN_MAX_LINES: usize = 8;
-pub const TURN_MAX_CHARS: usize = 400;
-pub const CURATED_MAX_CHARS: usize = 4000;
-pub const ROTATE_MAX_BYTES: u64 = 1_048_576;
+// Every number that bounds what reaches the model lives in `budget.rs`, so the
+// four context layers can be read off one page instead of three files.
+use crate::budget::{
+    CURATED_MAX_CHARS, HISTORY_DEPTH, ROTATE_MAX_BYTES, TURN_MAX_CHARS, TURN_MAX_LINES,
+};
 
 pub(crate) fn fit_turn(text: &str) -> String {
     crate::depth::normalize(text, TURN_MAX_LINES, TURN_MAX_CHARS)

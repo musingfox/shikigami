@@ -95,9 +95,11 @@ where
     match read(&entry.pane) {
         Err(error) => PaneRead::unread(format!("讀不到 {label}：{error}")),
         Ok(text) => {
-            // Same budget the prefetched screen excerpt uses, so a tool read and
-            // a prefetch of the same pane cost the model the same context.
-            let screen = crate::depth::normalize(&text, 12, 600);
+            let screen = crate::depth::normalize(
+                &text,
+                crate::budget::SCREEN_MAX_LINES,
+                crate::budget::SCREEN_MAX_CHARS,
+            );
             let text = if screen.is_empty() {
                 format!("{name} 目前沒有可讀的畫面。")
             } else {

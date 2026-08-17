@@ -1,3 +1,4 @@
+mod budget;
 mod cchooks;
 mod config;
 mod events;
@@ -90,14 +91,12 @@ async fn process_utterance(
         .map_err(|e| format!("stt: {e}"))?
         .map_err(|e| format!("stt: {e}"))?;
     let _ = app.emit(events::VOICE_TRANSCRIPT, transcript.clone());
-    // Roster + depth are blocking herdr socket calls (up to 3 pane reads at
-    // CALL_TIMEOUT each), so they go off the executor exactly like STT above.
-    let asked = transcript.clone();
-    let (roster, depth) = tauri::async_runtime::spawn_blocking(move || {
-        depth::roster_and_depth_with(&asked, herdr::get_roster, depth::collect)
-    })
-    .await
-    .map_err(|e| format!("brain: {e}"))?;
+    // No longer offloaded: this used to make up to 3 pane reads at herdr's
+    // CALL_TIMEOUT each, on every utterance. Those are the `read_pane` tool now
+    // (which does its own spawn_blocking), leaving two mutex reads — a cache and
+    // the hook spool — so a thread hop would cost more than it saves.
+    let (roster, depth) =
+        depth::roster_and_depth_with(&transcript, herdr::get_roster, depth::collect);
     let action = voice::reply_to_transcript(&transcript, &roster, &depth)
         .await
         .map_err(|e| format!("brain: {e}"))?;

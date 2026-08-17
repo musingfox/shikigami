@@ -101,8 +101,9 @@ pub fn parse_depth(line: &str) -> Option<HookDepth> {
 
 pub fn record_depth(line: &str) -> Option<HookDepth> {
     let mut depth = parse_depth(line)?;
-    if depth.detail.chars().count() > 2000 {
-        depth.detail = depth.detail.chars().rev().take(2000).collect::<String>().chars().rev().collect();
+    let max = crate::budget::HOOK_DETAIL_MAX_CHARS;
+    if depth.detail.chars().count() > max {
+        depth.detail = depth.detail.chars().rev().take(max).collect::<String>().chars().rev().collect();
     }
     let mut depths = HOOK_DEPTHS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(index) = depths.iter().position(|entry| entry.pane == depth.pane) {
