@@ -26,6 +26,12 @@ pub(crate) const MAX_STEPS: usize = 5;
 /// a function of what is left rather than a constant that could outlive the loop.
 pub(crate) const TURN_BUDGET: Duration = Duration::from_secs(45);
 
+/// Below this, the turn counts as out of time. A guard on `is_zero()` alone would
+/// let a sliver of budget through and spend a request that reliably times out, so
+/// running out of time would surface as a provider error instead of the honest
+/// ending the loop bounds exist to produce.
+pub(crate) const MIN_STEP_BUDGET: Duration = Duration::from_secs(2);
+
 const OUT_OF_STEPS: &str = "步數上限";
 const TIMED_OUT: &str = "時間上限";
 
@@ -293,7 +299,7 @@ where
     let mut found: Option<String> = None;
     for _ in 0..max_steps {
         let budget = remaining();
-        if budget.is_zero() {
+        if budget < MIN_STEP_BUDGET {
             return Ok(SummonAction::Speak(exhausted_message(
                 TIMED_OUT,
                 &consulted,
@@ -317,7 +323,7 @@ where
                     found = interim;
                 }
                 for call in calls {
-                    if remaining().is_zero() {
+                    if remaining() < MIN_STEP_BUDGET {
                         return Ok(SummonAction::Speak(exhausted_message(
                             TIMED_OUT,
                             &consulted,
@@ -1054,6 +1060,42 @@ mod tests {
         let message = spoken(run(&mut backend, &tools, || Duration::ZERO));
         assert_eq!(backend.calls(), 0);
         assert!(message.contains(TIMED_OUT));
+    }
+
+    // A sliver of budget is out of time, not a licence to spend a request that
+    // cannot finish — otherwise running out of time reads as a provider error.
+    #[test]
+    fn a_budget_too_small_to_finish_counts_as_out_of_time() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![StepAction::Speak("不該被問".into())])]);
+        let tools = FakeTools::new("");
+        let message = spoken(run(&mut backend, &tools, || Duration::from_millis(150)));
+        assert_eq!(backend.calls(), 0);
+        assert!(message.contains(TIMED_OUT));
+    }
+
+    // Same floor on the tool phase: a first step that spends the budget must not
+    // let a doomed second request through.
+    #[test]
+    fn a_sliver_left_after_a_tool_call_stops_before_the_next_request() {
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![read_pane("builder")]),
+            Ok(vec![StepAction::Speak("不該被問".into())]),
+        ]);
+        let tools = FakeTools::new("cargo test");
+        let calls = std::cell::Cell::new(0u32);
+        let message = spoken(run(&mut backend, &tools, || {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n == 0 {
+                Duration::from_secs(45)
+            } else {
+                Duration::from_millis(150)
+            }
+        }));
+        assert_eq!(backend.calls(), 1);
+        assert!(message.contains(TIMED_OUT));
+        // The read never ran, so the ending must not claim it consulted the pane.
+        assert!(!message.contains("builder 的畫面"));
     }
 
     // The per-request timeout is a function of the remaining turn budget, not a
