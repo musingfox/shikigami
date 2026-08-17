@@ -602,17 +602,18 @@ mod tests {
     // CuratedWriteCap — guardrail 3. The file never grows silently, and nothing
     // already in it is ever cut to make room.
     //
-    // The production write path lands with CuratedAppendOnly; this composes the
-    // three pure guardrails with a plain test append so the "a refusal leaves the
-    // file byte-identical" half has a receipt here too.
-    fn plan_and_write(dir: &Path, known: &[String], text: &str, source: &str) -> Result<String, String> {
-        let path = dir.join("MEMORY.md");
-        let existing = std::fs::read_to_string(&path).unwrap_or_default();
-        curated_source_ok(known, text, source)?;
-        let line = curated_line(text, source, "2026-08-17T05:00:00Z");
-        curated_cap_ok(&existing, &line)?;
-        std::fs::write(&path, format!("{existing}{line}\n")).unwrap();
-        Ok(line)
+    // The file-level cases below go through the production path `curated_write_in`
+    // rather than a locally composed one, so what they prove about the cap is what
+    // the app actually does — and the refusal they see is the append-only writer's.
+    // That path reads its own known-source set off disk, so each tmp dir needs the
+    // row the write cites; without it the refusal would come from guardrail 1 and
+    // the cap would go untested.
+    fn with_known_row(dir: &Path) {
+        std::fs::write(
+            dir.join("memory.jsonl"),
+            "{\"ts\":\"2026-08-16T09:12:03Z\",\"verb\":\"inject\",\"pane\":\"%1\",\"text\":\"跑測試\",\"agent\":\"cyris\"}\n",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -639,10 +640,16 @@ mod tests {
     #[test]
     fn an_already_oversized_file_admits_no_write_and_loses_nothing() {
         let tmp = Tmp::new();
+        with_known_row(&tmp.0);
         let theirs = "記".repeat(5000);
         std::fs::write(tmp.0.join("MEMORY.md"), &theirs).unwrap();
-        let reason = plan_and_write(&tmp.0, &known(), "使用者偏好 rebase", "2026-08-16T09:12:03Z")
-            .unwrap_err();
+        let reason = curated_write_in(
+            &tmp.0,
+            "使用者偏好 rebase",
+            "2026-08-16T09:12:03Z",
+            "2026-08-17T05:00:00Z",
+        )
+        .unwrap_err();
         assert!(reason.contains("5000"));
         assert!(reason.contains("4000"));
         assert_eq!(
@@ -655,20 +662,36 @@ mod tests {
     #[test]
     fn a_refused_write_leaves_not_half_a_line_behind() {
         let tmp = Tmp::new();
+        with_known_row(&tmp.0);
         let before = format!("{}\n", "記".repeat(3990));
         std::fs::write(tmp.0.join("MEMORY.md"), &before).unwrap();
-        assert!(plan_and_write(&tmp.0, &known(), &"字".repeat(50), "2026-08-16T09:12:03Z").is_err());
+        let reason = curated_write_in(
+            &tmp.0,
+            &"字".repeat(50),
+            "2026-08-16T09:12:03Z",
+            "2026-08-17T05:00:00Z",
+        )
+        .unwrap_err();
+        // named so the refusal is the cap's, not guardrail 1's — the source is on
+        // disk here, and a green `is_err()` alone could not tell the two apart
+        assert!(reason.contains("4000"));
         assert_eq!(
             std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap(),
             before
         );
 
         // and a write that does fit really does land, so the refusal above is the
-        // cap talking and not a helper that never writes
+        // cap talking and not a path that never writes
         let small = Tmp::new();
+        with_known_row(&small.0);
         std::fs::write(small.0.join("MEMORY.md"), "使用者的話\n").unwrap();
-        let line = plan_and_write(&small.0, &known(), "使用者偏好 rebase", "2026-08-16T09:12:03Z")
-            .unwrap();
+        let line = curated_write_in(
+            &small.0,
+            "使用者偏好 rebase",
+            "2026-08-16T09:12:03Z",
+            "2026-08-17T05:00:00Z",
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(small.0.join("MEMORY.md")).unwrap(),
             format!("使用者的話\n{line}\n")
