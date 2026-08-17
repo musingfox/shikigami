@@ -1207,11 +1207,22 @@ mod tests {
         // is Summon; an ordinary question -> Speak (no false trigger).
         // --nocapture prints both replies as the transcript Review asks for.
         // run: <PROVIDER>_API_KEY=... cargo test sap9_live -- --ignored --nocapture
-        let summon = tauri::async_runtime::block_on(ask("幫我開 cyris 跑測試", &[], &[])).unwrap();
+        //
+        // ask() commits every turn to the config dir, so each half runs against
+        // its own throwaway root: the real memory.jsonl never receives a summon
+        // that did not happen, and the Q&A half cannot read the summon turn the
+        // first half just wrote.
+        let ask_isolated = |transcript: &str| {
+            let tmp = Tmp::new();
+            let _dir = crate::config::test_override::ConfigDirOverride::set(&tmp.0);
+            tauri::async_runtime::block_on(ask(transcript, &[], &[])).unwrap()
+        };
+
+        let summon = ask_isolated("幫我開 cyris 跑測試");
         println!("summon turn reply: {summon}");
         assert!(matches!(parse_action(&summon), SummonAction::Summon { .. }));
 
-        let qa = tauri::async_runtime::block_on(ask("現在誰在工作", &[], &[])).unwrap();
+        let qa = ask_isolated("現在誰在工作");
         println!("q&a turn reply: {qa}");
         assert!(matches!(parse_action(&qa), SummonAction::Speak(_)));
     }
