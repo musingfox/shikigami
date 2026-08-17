@@ -189,15 +189,17 @@ mod tests {
         // Until the screen prefetch was removed this test could pass on the screen
         // half alone — which is exactly why R-observe's hook half had no receipt.
         // Now the join can only be proven by a hook line, so this is that receipt.
+        //
         // HOOK_DEPTHS is process-global and cchooks' own tests assert on it, so
-        // this must leave it as it was found — filling a shared global and walking
-        // away is how a victim test fails for a reason nobody can locate.
-        crate::cchooks::clear_depths();
-        let spool = std::fs::read_to_string(crate::cchooks::spool_path())
-            .expect("live test needs the real hooks.ndjson spool");
-        for line in spool.lines() {
-            crate::cchooks::record_depth(line);
-        }
+        // take their lock: without it, `cargo test -- --include-ignored` lets this
+        // test's 64-odd real spool entries land inside one of theirs. The guard is
+        // built before anything is written, so a panic on the spool read cannot
+        // leave the global dirty. It **clears** rather than preserving what was
+        // there — safe only because the lock serializes access and every other
+        // reader clears first too.
+        let _lock = crate::cchooks::DEPTH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         struct Restore;
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -205,6 +207,22 @@ mod tests {
             }
         }
         let _restore = Restore;
+        crate::cchooks::clear_depths();
+        let spool = std::fs::read_to_string(crate::cchooks::spool_path())
+            .expect("live test needs the real hooks.ndjson spool");
+        // Keep what the spool file itself said, parsed straight from disk. This is
+        // the only independent half of the receipt: AgentDepth.pane is copied from
+        // the roster row, so printing it next to the roster's own pane id would be
+        // the same value twice under two labels.
+        let mut hook_panes: Vec<String> = Vec::new();
+        for line in spool.lines() {
+            if let Some(depth) = crate::cchooks::parse_depth(line) {
+                if !hook_panes.contains(&depth.pane) {
+                    hook_panes.push(depth.pane.clone());
+                }
+            }
+            crate::cchooks::record_depth(line);
+        }
         let depth = crate::depth::collect(&roster);
         let observed = roster
             .iter()
@@ -222,10 +240,21 @@ mod tests {
         assert!(matched.precise.is_some());
         assert!(matched.screen.is_none());
 
+        // The join really is proven by `matched.precise.is_some()` above —
+        // `precise_for(&agent.pane)` can only answer for a pane a spool line
+        // carried. What is printed has to show that independently, so: the roster's
+        // pane id, the pane ids the spool file itself carried, and the hook's own
+        // words that ended up attached to that agent.
+        assert!(hook_panes.contains(&observed.pane));
         let prompt = crate::brain::system_prompt(&roster, &depth, None, &[]);
         println!(
-            "join receipt: HERDR_PANE_ID={} herdr pane_id={}\n\nsystem prompt:\n{}",
-            matched.pane, observed.pane, prompt
+            "join receipt: herdr said pane_id={}, and that value is among the {} \
+             HERDR_PANE_ID values the spool file itself carried\n\
+             hook's own words now attached to that agent: {:?}\n\nsystem prompt:\n{}",
+            observed.pane,
+            hook_panes.len(),
+            matched.precise.as_ref().map(|p| &p.detail),
+            prompt
         );
         assert!(prompt.contains("精確訊號") || prompt.contains("畫面節錄"));
 

@@ -176,10 +176,17 @@ pub fn spawn_watcher(app: tauri::AppHandle) {
     });
 }
 
+/// Serializes every test that touches the process-global `HOOK_DEPTHS`. It sits
+/// out here rather than inside `mod tests` because live tests in other modules
+/// have to take it too — one test filling this global unlocked fails another at
+/// the far end of the crate, for a cause nobody can locate from the failure.
+#[cfg(test)]
+pub(crate) static DEPTH_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
+    use super::DEPTH_TEST_LOCK as TEST_LOCK;
     use super::*;
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     // exact shape scripts/cc-hook.sh produces
     const LIVE_LIKE: &str = r#"{"kind":"stop","pane":"wT:p1","ts":"2026-07-23T10:00:00Z","payload":{"session_id":"abc-123","transcript_path":"/x/y.jsonl","cwd":"/Users/x/proj"}}"#;
