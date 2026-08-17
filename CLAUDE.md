@@ -131,11 +131,16 @@ Depth of observation (R-observe, 2026-08-16, `main` @ `f352e16`):
   are now verified live 2026-08-17** — `vdp_t2` used to pass on the screen half
   alone, which is precisely why the hook half had no receipt; removing the screen
   prefetch left it nowhere to hide, and it now asserts `precise.is_some()` **and**
-  `screen.is_none()`. Receipt: `HERDR_PANE_ID=w7Q:p1 herdr pane_id=w7Q:p1` with
-  `精確訊號：permission_prompt：Claude needs your permission` in the prompt. The
-  archived ticket's "未收齊的收據" is closed. Note the mechanism: a test binary runs
-  neither the roster poll nor the spool tailer, so a live test must read both
-  itself (`herdr::fetch_roster_now`, and `record_depth` over `spool_path`)
+  `screen.is_none()`. Receipt: herdr said `pane_id=w7Q:p1`, that value is among the
+  138 `HERDR_PANE_ID`s the spool file itself carried, and the hook's own words
+  ("Claude is waiting for your input") end up attached to that agent in the prompt.
+  The archived ticket's "未收齊的收據" is closed. Two things worth keeping: a test
+  binary runs neither the roster poll nor the spool tailer, so a live test must read
+  both itself (`herdr::fetch_roster_now`, and `record_depth` over `spool_path`,
+  under `cchooks::DEPTH_TEST_LOCK`); and the **first** version of this receipt
+  printed `AgentDepth.pane` beside the roster's own pane id — the same value twice
+  under two labels, since `collect_with` copies it from the roster row. A receipt
+  has to name two independent sources or it is decoration
 - `AgentEntry` and `events.ts` deliberately untouched: depth reaches the brain
   only. Showing it in the UI is a separate, unopened ticket
 
