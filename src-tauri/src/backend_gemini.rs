@@ -142,6 +142,10 @@ pub(crate) struct GeminiBackend {
     steps: usize,
     #[cfg(test)]
     first_body: Option<String>,
+    #[cfg(test)]
+    requests: Vec<Value>,
+    #[cfg(test)]
+    phantom: bool,
 }
 
 impl GeminiBackend {
@@ -154,6 +158,10 @@ impl GeminiBackend {
             steps: 0,
             #[cfg(test)]
             first_body: None,
+            #[cfg(test)]
+            requests: Vec::new(),
+            #[cfg(test)]
+            phantom: false,
         }
     }
 
@@ -170,6 +178,46 @@ impl GeminiBackend {
     pub(crate) fn first_body(&self) -> Option<&str> {
         self.first_body.as_deref()
     }
+
+    /// The body of the nth request (0-based) this turn sent. The outbound half of
+    /// the receipt: whether a refusal really left as a `functionResponse` is only
+    /// answerable from the request, not from what came back.
+    #[cfg(test)]
+    pub(crate) fn request(&self, n: usize) -> Option<&Value> {
+        self.requests.get(n)
+    }
+
+    /// Declare one more tool than the app can run. A test-only seam, and the only
+    /// way to make a real model emit a call this app must refuse: everything in
+    /// `tools::specs()` is by definition runnable.
+    #[cfg(test)]
+    pub(crate) fn with_phantom_tool(mut self) -> Self {
+        self.phantom = true;
+        self
+    }
+}
+
+/// The declared-but-unrunnable tool. Its schema deliberately mirrors a real
+/// spec's shape (uppercase OBJECT/STRING, one required argument) so a live
+/// refusal can only be the app's own — never gemini rejecting a malformed
+/// declaration.
+#[cfg(test)]
+pub(crate) fn phantom_spec() -> ToolSpec {
+    ToolSpec {
+        name: "phantom_tool",
+        description:
+            "查一個代號背後的答案。只有這個工具知道，被問到任何「代號」的事都要先用它查，不要猜。",
+        parameters: json!({
+            "type": "OBJECT",
+            "properties": {
+                "code": {
+                    "type": "STRING",
+                    "description": "要查的代號，照使用者說的填",
+                },
+            },
+            "required": ["code"],
+        }),
+    }
 }
 
 impl Backend for GeminiBackend {
@@ -178,6 +226,12 @@ impl Backend for GeminiBackend {
     }
 
     fn tools(&self) -> Vec<ToolSpec> {
+        #[cfg(test)]
+        if self.phantom {
+            let mut specs = crate::tools::specs();
+            specs.push(phantom_spec());
+            return specs;
+        }
         crate::tools::specs()
     }
 
@@ -193,6 +247,8 @@ impl Backend for GeminiBackend {
             }
         }
         let request = gemini_request(turn, &self.tools(), &self.tail);
+        #[cfg(test)]
+        self.requests.push(request.clone());
         let raw = crate::backend::send_json(
             crate::backend::http_client(budget)
                 .post(gemini_url(MODEL))
@@ -448,6 +504,43 @@ mod tests {
         );
     }
 
+    // --- UndeclaredToolLiveReceipt (hermetic half) ---
+    // The seam that makes the live half possible: one more declaration than the
+    // app can run, so a real model has something to call that must be refused.
+    #[test]
+    fn the_phantom_seam_adds_one_declaration_and_changes_no_other() {
+        let plain = GeminiBackend::new("k".into());
+        let seamed = GeminiBackend::new("k".into()).with_phantom_tool();
+        let names = |backend: &GeminiBackend| {
+            backend.tools().iter().map(|spec| spec.name).collect::<Vec<_>>()
+        };
+        assert_eq!(names(&plain), ["read_pane", "summon", "recall", "memory"]);
+        assert_eq!(
+            names(&seamed),
+            ["read_pane", "summon", "recall", "memory", "phantom_tool"]
+        );
+        // the four real declarations cross the wire byte-identical either way
+        assert_eq!(seamed.tools()[..4], crate::tools::specs()[..]);
+        let declared = gemini_request(&turn("hi"), &seamed.tools(), &[]);
+        let declared = declared["tools"][0]["functionDeclarations"].as_array().unwrap();
+        assert_eq!(declared.len(), 5);
+        assert_eq!(declared[4]["name"], "phantom_tool");
+        assert_eq!(declared[4]["parameters"]["required"], json!(["code"]));
+    }
+
+    // Nothing about the refusal depends on the arguments: the name alone decides
+    // it, and the call id comes back so the answer can be matched to the call.
+    #[test]
+    fn an_undeclared_name_is_refused_with_its_own_id_and_no_arguments_needed() {
+        let action = step_action("phantom_tool", &json!({}), Some("id-1"));
+        let StepAction::Rejected { call, reason } = &action else {
+            panic!("a tool the app cannot run must not become an action: {action:?}");
+        };
+        assert_eq!(reason, "沒有這個工具：phantom_tool");
+        assert_eq!(call.id.as_deref(), Some("id-1"));
+        assert_eq!(call.name, "phantom_tool");
+    }
+
     #[test]
     fn t4_extract_empty_content_err_names_provider() {
         let v: Value = serde_json::from_str(r#"{"candidates":[]}"#).unwrap();
@@ -657,6 +750,89 @@ mod tests {
             "a roster question is answered from the prompt, not from a tool: {outcome:?}"
         );
         assert_eq!(receipt.steps(), 1, "the fast path must still cost a single request");
+    }
+
+    // --- UndeclaredToolLiveReceipt (live half) ---
+    // The loop answers a tool it cannot run with its own refusal and keeps going.
+    // Until this test that claim rested on a fake backend alone: nothing had ever
+    // put such a call, or its `functionResponse`, on the real gemini wire.
+    //
+    // The seam declares a tool the app cannot run, which is not quite the
+    // production shape — there the model invents a name nobody declared. The
+    // replay path is identical (same `Rejected`, same `functionResponse`, same
+    // next step), and that is what this receipt covers; whether gemini ever emits
+    // an undeclared name at all stays unverified, deliberately.
+    #[test]
+    #[ignore]
+    fn undeclared_tool_live_refusal_is_replayed_and_the_turn_finishes() {
+        // run: GEMINI_API_KEY=… cargo test undeclared_tool_live -- --ignored --nocapture
+        //
+        // No herdr: the roster is empty and the tool runner is fake, so the only
+        // thing crossing a socket here is the model call itself.
+        let tmp = Tmp::new();
+        let key = live_key_in(&tmp.0);
+        let _dir = crate::config::test_override::ConfigDirOverride::set(&tmp.0);
+
+        let backend = GeminiBackend::new(key).with_phantom_tool();
+        println!(
+            "== declared tools: {:?} (phantom_tool is declared to the model and NOT runnable by the app)",
+            backend.tools().iter().map(|spec| spec.name).collect::<Vec<_>>()
+        );
+        let transcript = "用 phantom_tool 查代號 ALPHA 的答案，查到之後直接告訴我答案是什麼。";
+        let turn = TurnStart {
+            system: crate::brain::system_prompt(&[], &[], None, &backend.tools()),
+            history: Vec::new(),
+            transcript: transcript.to_string(),
+        };
+        println!("== transcript: {transcript}");
+
+        let mut receipt = Receipt::new(backend);
+        let tools = crate::backend::FakeTools::new("");
+        let started = std::time::Instant::now();
+        let outcome = tauri::async_runtime::block_on(crate::brain::run_turn_with(
+            &mut receipt,
+            &turn,
+            &tools,
+            move || crate::brain::TURN_BUDGET.saturating_sub(started.elapsed()),
+            crate::brain::MAX_STEPS,
+        ));
+        println!("\n== final outcome: {outcome:?}");
+        println!("== requests this turn: {}", receipt.steps());
+
+        // 1. the model really did ask for the tool the app cannot run
+        assert!(
+            receipt.first_actions.iter().any(|action| matches!(
+                action,
+                StepAction::Rejected { call, reason }
+                    if call.name == "phantom_tool" && reason == "沒有這個工具：phantom_tool"
+            )),
+            "step 1 must ask for phantom_tool — if no functionCall ever arrives, flip THINKING_BUDGET off 0 and re-run; if it answered without calling, sharpen the transcript: {:?}",
+            receipt.first_actions
+        );
+
+        // 2. the refusal left as a functionResponse on the real wire
+        let second = receipt.inner.request(1).expect(
+            "the turn ended after one request: the refusal was never replayed, which is the whole thing this receipt is for",
+        );
+        println!(
+            "== step-2 request contents (the replay):\n{}",
+            serde_json::to_string_pretty(&second["contents"]).unwrap_or_default()
+        );
+        let replayed = second["contents"]
+            .as_array()
+            .expect("a request always carries contents")
+            .iter()
+            .flat_map(|entry| entry["parts"].as_array().cloned().unwrap_or_default())
+            .filter_map(|part| part.get("functionResponse").cloned())
+            .find(|response| response["name"] == "phantom_tool")
+            .expect("step 2 must answer the phantom call with a functionResponse of its own");
+        assert_eq!(replayed["response"]["result"], "沒有這個工具：phantom_tool");
+
+        // 3. and the turn ended in speech, not in an error
+        assert!(
+            matches!(outcome, Ok(crate::brain::SummonAction::Speak(_))),
+            "a refused tool must not end the turn as a failure: {outcome:?}"
+        );
     }
 
     // --- GeminiToolResultRoundTrip ---

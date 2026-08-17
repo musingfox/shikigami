@@ -414,14 +414,19 @@ where
                         // model can correct itself inside the step budget instead
                         // of the turn failing.
                         //
-                        // ponytail: unit-tested through the fake backend only —
-                        // replaying an undeclared call plus its functionResponse
-                        // has never gone over the real gemini wire, so "the turn
-                        // continues" is unverified there. Upgrade path: an
-                        // #[ignore] live case that induces a call to a tool that
-                        // does not exist. Worth doing when a second tool lands
-                        // (recall / memory), since that is when a model actually
-                        // starts guessing tool names.
+                        // Verified on the real gemini wire by
+                        // `undeclared_tool_live_refusal_is_replayed_and_the_turn_finishes`
+                        // (backend_gemini.rs, #[ignore]): the refusal goes back as
+                        // that call's functionResponse and the turn still ends in
+                        // speech.
+                        //
+                        // ponytail: the receipt does NOT cover the whole gap. It
+                        // uses a test seam that declares a tool the app cannot run;
+                        // production's case is a name nobody declared at all. The
+                        // replay path is the same code either way, so what stays
+                        // unverified is upstream of it: whether gemini ever emits
+                        // an undeclared name. Closing that needs an inherently
+                        // flaky induction test — judged to cost more than it says.
                         StepAction::Rejected { call, reason } => {
                             results.push(ToolResult { call, text: reason })
                         }
@@ -1165,16 +1170,16 @@ mod tests {
     fn a_tool_we_do_not_have_is_answered_in_band_not_as_a_failure() {
         let mut backend = FakeBackend::new(vec![
             Ok(vec![StepAction::Rejected {
-                call: CallRef { id: None, name: "recall".into() },
-                reason: "沒有這個工具：recall".into(),
+                call: CallRef { id: None, name: "phantom_tool".into() },
+                reason: "沒有這個工具：phantom_tool".into(),
             }]),
-            Ok(vec![StepAction::Speak("我沒辦法回想".into())]),
+            Ok(vec![StepAction::Speak("我沒辦法查那個".into())]),
         ]);
         let tools = FakeTools::new("cargo test");
         assert!(run(&mut backend, &tools, always(45)).is_ok());
         let fed = backend.results_on(2);
         assert_eq!(fed.len(), 1);
-        assert_eq!(fed[0].text, "沒有這個工具：recall");
+        assert_eq!(fed[0].text, "沒有這個工具：phantom_tool");
         assert!(tools.reads().is_empty());
     }
 
