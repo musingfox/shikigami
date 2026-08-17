@@ -7,6 +7,7 @@ mod memory;
 mod tray;
 mod backend;
 mod backend_gemini;
+mod backend_text;
 mod brain;
 mod voice;
 mod stt;
