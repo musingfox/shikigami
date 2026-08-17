@@ -65,6 +65,25 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
                 "required": ["query"],
             }),
         },
+        ToolSpec {
+            name: "memory",
+            description:
+                "把一件之後每一輪都該知道的事寫進長期記憶。只在使用者明確要你記住、或說出一個長期偏好時用。source 必須填 recall 查到的那一列開頭的時間戳，逐字照抄；不確定就先用 recall 查出來，不要自己編一個時間戳——編的寫不進去。寫入只會加在檔尾，不會動到使用者自己寫的內容。",
+            parameters: json!({
+                "type": "OBJECT",
+                "properties": {
+                    "text": {
+                        "type": "STRING",
+                        "description": "要記住的那件事，一句話寫完",
+                    },
+                    "source": {
+                        "type": "STRING",
+                        "description": "這件事的來源：recall 查到的那一列開頭的時間戳，逐字照抄",
+                    },
+                },
+                "required": ["text", "source"],
+            }),
+        },
     ]
 }
 
@@ -76,6 +95,11 @@ pub(crate) trait Tools {
     /// source" question to answer: the memory files are the app's own state, so
     /// a query that ran at all consulted them — finding nothing included.
     fn recall(&self, query: &str) -> impl Future<Output = String> + Send;
+
+    /// Add one line to the curated layer. The only tool here with a side effect,
+    /// and the only one whose answer the model must not be able to assume: four
+    /// guardrails can refuse it, so what came back says which happened.
+    fn write_memory(&self, text: &str, source: &str) -> impl Future<Output = MemoryWrite> + Send;
 }
 
 /// What one `read_pane` call produced. `text` always goes back to the model — a
@@ -227,6 +251,33 @@ fn fit_row_text(text: &str) -> String {
     format!("{head}…")
 }
 
+/// What one `memory` call produced. `text` always goes back to the model —
+/// a refusal is something it can correct itself from. `written` is the separate
+/// question of whether a line really landed on disk, and it is the exact line
+/// that did: the same split `PaneRead::consulted` makes, for the same reason —
+/// nothing may later claim the write happened unless this says it did.
+#[derive(Debug)]
+pub(crate) struct MemoryWrite {
+    pub text: String,
+    pub written: Option<String>,
+}
+
+/// The tool-result body for one `memory` call. Never fails: a guardrail refusal
+/// and a broken file both come back as the app's own words — unfenced, like every
+/// other refusal here — so the model can correct itself inside the step budget.
+pub(crate) fn memory_write_body<F>(text: &str, source: &str, write: F) -> MemoryWrite
+where
+    F: FnOnce(&str, &str) -> Result<String, String>,
+{
+    match write(text, source) {
+        Ok(line) => MemoryWrite {
+            text: format!("已經記進長期記憶了：{line}"),
+            written: Some(line),
+        },
+        Err(reason) => MemoryWrite { text: reason, written: None },
+    }
+}
+
 /// A spoken agent name -> the roster row it names. Resolved against the turn's
 /// snapshot only: a tool call must never cost a fresh herdr socket.
 fn resolve<'a>(roster: &'a [AgentEntry], agent: &str) -> Option<&'a AgentEntry> {
@@ -258,6 +309,25 @@ impl Tools for LiveTools {
             })
             .await
             .unwrap_or_else(|error| format!("查不到長期記憶：{error}"))
+        }
+    }
+
+    fn write_memory(&self, text: &str, source: &str) -> impl Future<Output = MemoryWrite> + Send {
+        let dir = self.dir.clone();
+        let (text, source) = (text.to_string(), source.to_string());
+        async move {
+            // Reading the memory rows and appending a line is blocking IO, so it
+            // goes on a blocking thread exactly like the other two tools.
+            tauri::async_runtime::spawn_blocking(move || {
+                memory_write_body(&text, &source, |text, source| {
+                    crate::memory::write_curated(&dir, text, source)
+                })
+            })
+            .await
+            .unwrap_or_else(|error| MemoryWrite {
+                text: format!("寫不進長期記憶：{error}"),
+                written: None,
+            })
         }
     }
 
@@ -529,11 +599,53 @@ mod tests {
         let specs = specs();
         assert_eq!(
             specs.iter().map(|spec| spec.name).collect::<Vec<_>>(),
-            ["read_pane", "summon", "recall"]
+            ["read_pane", "summon", "recall", "memory"]
         );
         assert!(specs.iter().all(|spec| !spec.description.is_empty()));
         assert_eq!(specs[0].parameters["required"], json!(["agent"]));
         assert_eq!(specs[1].parameters["required"], json!(["project", "task"]));
         assert_eq!(specs[2].parameters["required"], json!(["query"]));
+        assert_eq!(specs[3].parameters["required"], json!(["text", "source"]));
+    }
+
+    // The write protocol lives in the tool description, not in the system prompt:
+    // a model that never reads it invents a timestamp, and an invented timestamp
+    // is exactly what guardrail 1 refuses.
+    #[test]
+    fn the_memory_tool_tells_the_model_where_a_source_comes_from() {
+        let memory = specs().into_iter().find(|spec| spec.name == "memory").unwrap();
+        assert!(memory.description.contains("recall"));
+        assert!(memory.description.contains("時間戳"));
+        assert!(memory.description.contains("逐字照抄"));
+        assert!(memory.parameters["properties"]["source"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("recall"));
+    }
+
+    // --- memory ---
+    #[test]
+    fn a_write_that_landed_reports_the_line_it_really_wrote() {
+        let write = memory_write_body("使用者偏好 rebase", "T1", |_, _| {
+            Ok("- 式神 T2（來源 T1）：使用者偏好 rebase".to_string())
+        });
+        assert_eq!(
+            write.written.as_deref(),
+            Some("- 式神 T2（來源 T1）：使用者偏好 rebase")
+        );
+        assert!(write.text.contains("已經記進長期記憶"));
+        assert!(write.text.contains("使用者偏好 rebase"));
+    }
+
+    // A refusal is the app's own words, so no fence — and nothing was written, so
+    // nothing may later claim it was.
+    #[test]
+    fn a_refused_write_hands_back_the_reason_and_admits_nothing_landed() {
+        let write = memory_write_body("使用者偏好 rebase", "編的", |_, _| {
+            Err("查不到來源 編的".to_string())
+        });
+        assert_eq!(write.text, "查不到來源 編的");
+        assert_eq!(write.written, None);
+        assert!(!write.text.contains(FENCE_OPEN));
     }
 }

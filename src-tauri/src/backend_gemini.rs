@@ -288,7 +288,7 @@ mod tests {
         let declared = v["tools"][0]["functionDeclarations"].as_array().unwrap();
         assert_eq!(
             declared.iter().map(|d| d["name"].as_str().unwrap()).collect::<Vec<_>>(),
-            ["read_pane", "summon", "recall"]
+            ["read_pane", "summon", "recall", "memory"]
         );
         let read_pane = &declared[0]["parameters"];
         assert_eq!(read_pane["type"], "OBJECT");

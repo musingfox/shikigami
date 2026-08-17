@@ -50,6 +50,7 @@ pub enum StepAction {
     Speak(String),
     ReadPane { call: CallRef, agent: String },
     Recall { call: CallRef, query: String },
+    Memory { call: CallRef, text: String, source: String },
     Summon { project: String, task: String },
     Rejected { call: CallRef, reason: String },
 }
@@ -112,6 +113,16 @@ pub fn step_action(name: &str, args: &Value, id: Option<&str>) -> StepAction {
                 };
             }
             StepAction::Recall { call, query }
+        }
+        "memory" => {
+            let (text, source) = (field("text"), field("source"));
+            if text.is_empty() || source.is_empty() {
+                return StepAction::Rejected {
+                    call,
+                    reason: "memory 需要 text 和 source 兩個參數都填好：source 要填 recall 查到的那一列開頭的來源時間戳，逐字照抄。".to_string(),
+                };
+            }
+            StepAction::Memory { call, text, source }
         }
         "summon" => {
             let (project, task) = (field("project"), field("task"));
@@ -418,6 +429,7 @@ pub(crate) struct FakeTools {
     roster: Vec<crate::events::AgentEntry>,
     screen: String,
     rows: Vec<crate::memory::MemoryRow>,
+    dir: Option<std::path::PathBuf>,
     reads: std::sync::Mutex<Vec<String>>,
     queries: std::sync::Mutex<Vec<String>>,
 }
@@ -437,9 +449,18 @@ impl FakeTools {
             roster: vec![entry("builder", "%1"), entry("reviewer", "%2")],
             screen: screen.to_string(),
             rows: Vec::new(),
+            dir: None,
             reads: std::sync::Mutex::new(Vec::new()),
             queries: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Where this runner's `memory` writes land. Deliberately a real directory
+    /// and the real guardrail chain: a fake that always says "written" would
+    /// prove nothing about a tool whose whole point is that it can refuse.
+    pub(crate) fn with_dir(mut self, dir: &std::path::Path) -> Self {
+        self.dir = Some(dir.to_path_buf());
+        self
     }
 
     /// The memory rows this runner's `recall` searches. Same body the live runner
@@ -471,6 +492,22 @@ impl crate::tools::Tools for FakeTools {
     fn recall(&self, query: &str) -> impl Future<Output = String> + Send {
         self.queries.lock().unwrap().push(query.to_string());
         std::future::ready(crate::tools::recall_body(&self.rows, query).0)
+    }
+
+    fn write_memory(
+        &self,
+        text: &str,
+        source: &str,
+    ) -> impl Future<Output = crate::tools::MemoryWrite> + Send {
+        std::future::ready(match &self.dir {
+            Some(dir) => crate::tools::memory_write_body(text, source, |text, source| {
+                crate::memory::write_curated(dir, text, source)
+            }),
+            None => crate::tools::MemoryWrite {
+                text: "沒有可以寫入的長期記憶檔。".to_string(),
+                written: None,
+            },
+        })
     }
 }
 
@@ -628,6 +665,42 @@ mod tests {
             panic!("a recall without a query must not become a call");
         };
         assert!(reason.contains("query"));
+    }
+
+    // A write without a source is the one call that must never become an action:
+    // it is correctable in band, and it names both halves of what is missing.
+    #[test]
+    fn a_memory_write_without_a_source_is_rejected_naming_the_argument() {
+        let StepAction::Rejected { reason, .. } =
+            step_action("memory", &serde_json::json!({ "text": "x" }), None)
+        else {
+            panic!("a memory write without a source must not become a call");
+        };
+        assert!(reason.contains("source"));
+        assert!(reason.contains("來源"));
+        assert!(reason.contains("recall"));
+
+        // and the same the other way round
+        assert!(matches!(
+            step_action("memory", &serde_json::json!({ "source": "T1" }), None),
+            StepAction::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn a_complete_memory_write_becomes_a_neutral_action() {
+        assert_eq!(
+            step_action(
+                "memory",
+                &serde_json::json!({ "text": " 使用者偏好 rebase ", "source": " T1 " }),
+                Some("c4"),
+            ),
+            StepAction::Memory {
+                call: CallRef { id: Some("c4".into()), name: "memory".into() },
+                text: "使用者偏好 rebase".into(),
+                source: "T1".into(),
+            }
+        );
     }
 
     #[test]

@@ -306,6 +306,13 @@ pub(crate) fn curated_split(text: &str) -> (String, String) {
     (user.join("\n"), model.join("\n"))
 }
 
+/// `curated_write_in` on the real clock — what the `memory` tool calls. The
+/// write's own timestamp is taken here so nothing above this line has to carry a
+/// clock around.
+pub(crate) fn write_curated(dir: &Path, text: &str, source: &str) -> Result<String, String> {
+    curated_write_in(dir, text, source, &crate::sumvox::rfc3339_utc(unix_secs()))
+}
+
 fn curated_warning(chars: usize) -> Option<String> {
     (chars > CURATED_MAX_CHARS).then(|| {
         format!(

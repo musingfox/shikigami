@@ -278,6 +278,7 @@ fn decide(actions: &[StepAction]) -> Decision {
                 action,
                 StepAction::ReadPane { .. }
                     | StepAction::Recall { .. }
+                    | StepAction::Memory { .. }
                     | StepAction::Rejected { .. }
             )
         })
@@ -394,6 +395,20 @@ where
                                 consulted.push(label);
                             }
                             results.push(ToolResult { call, text });
+                        }
+                        // The one tool with a side effect. Four guardrails can
+                        // refuse it, so only a write that really landed lets the
+                        // turn count long-term memory as touched — a refusal must
+                        // never be spoken back as if the thing had been recorded.
+                        StepAction::Memory { call, text, source } => {
+                            let write = tools.write_memory(&text, &source).await;
+                            if write.written.is_some() {
+                                let label = MEMORY_SOURCE.to_string();
+                                if !consulted.contains(&label) {
+                                    consulted.push(label);
+                                }
+                            }
+                            results.push(ToolResult { call, text: write.text });
                         }
                         // A tool we cannot run answers with its own reason, so the
                         // model can correct itself inside the step budget instead
@@ -1201,6 +1216,115 @@ mod tests {
         // asked on every step it had, named once
         assert_eq!(tools.queries().len(), MAX_STEPS - 1);
         assert_eq!(message.matches("長期記憶").count(), 1);
+    }
+
+    // MemoryToolInTurnLoop — the model can write one thing into long-term memory
+    // mid-turn and is told, in the same turn, whether it landed.
+    fn memory_call(text: &str, source: &str) -> StepAction {
+        StepAction::Memory {
+            call: CallRef { id: None, name: "memory".into() },
+            text: text.into(),
+            source: source.into(),
+        }
+    }
+
+    /// A config dir whose fact layer carries exactly the row `T1` names, so a
+    /// write citing it passes guardrail 1 for a real reason.
+    fn dir_with_one_row() -> Tmp {
+        let tmp = Tmp::new();
+        std::fs::write(
+            tmp.0.join("memory.jsonl"),
+            "{\"ts\":\"T1\",\"verb\":\"inject\",\"pane\":\"%1\",\"text\":\"跑測試\",\"agent\":\"cyris\"}\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn a_write_that_landed_is_reported_back_in_the_same_turn() {
+        let tmp = dir_with_one_row();
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![memory_call("使用者偏好 rebase", "T1")]),
+            Ok(vec![StepAction::Speak("記下來了".into())]),
+        ]);
+        let tools = FakeTools::new("").with_dir(&tmp.0);
+        assert_eq!(
+            run(&mut backend, &tools, always(45)),
+            Ok(SummonAction::Speak("記下來了".into()))
+        );
+        let fed = backend.results_on(2);
+        assert_eq!(fed.len(), 1);
+        assert_eq!(fed[0].call.name, "memory");
+        assert!(fed[0].text.contains("已經記進長期記憶"));
+
+        let file = std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap();
+        assert_eq!(file.lines().count(), 1);
+        assert!(file.contains("使用者偏好 rebase"));
+        assert!(file.contains("（來源 T1）"));
+        assert!(file.starts_with(crate::memory::MODEL_LINE_PREFIX));
+    }
+
+    // The guardrail is structural, so the refusal reaches the model as an ordinary
+    // tool result — and the file is exactly what it was.
+    #[test]
+    fn a_write_naming_a_source_that_does_not_exist_changes_no_file() {
+        let tmp = dir_with_one_row();
+        std::fs::write(tmp.0.join("MEMORY.md"), "使用者的話\n").unwrap();
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![memory_call("使用者偏好 rebase", "2020-01-01T00:00:00Z")]),
+            Ok(vec![StepAction::Speak("我查不到那筆紀錄".into())]),
+        ]);
+        let tools = FakeTools::new("").with_dir(&tmp.0);
+        assert!(run(&mut backend, &tools, always(45)).is_ok());
+
+        let fed = backend.results_on(2);
+        assert_eq!(fed.len(), 1);
+        assert!(fed[0].text.contains("查不到"));
+        assert!(fed[0].text.contains("2020-01-01T00:00:00Z"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap(),
+            "使用者的話\n"
+        );
+    }
+
+    // Same rule as a pane that was never reached: a refused write is not a thing
+    // the turn may claim to have done.
+    #[test]
+    fn a_refused_write_is_never_claimed_as_a_touched_source() {
+        let tmp = dir_with_one_row();
+        let mut backend =
+            FakeBackend::new(vec![Ok(vec![memory_call("使用者偏好 rebase", "編的時間戳")])]);
+        let tools = FakeTools::new("").with_dir(&tmp.0);
+        let message = spoken(run(&mut backend, &tools, always(45)));
+        assert!(message.contains(OUT_OF_STEPS));
+        assert!(message.contains("我還沒查到任何東西"));
+        assert!(!tmp.0.join("MEMORY.md").exists());
+    }
+
+    // What the write tool said lives for this turn only — the rolling layer keeps
+    // the conclusion, never the tool traffic.
+    #[test]
+    fn what_the_memory_tool_answered_never_reaches_the_next_turns_rolling_layer() {
+        let tmp = dir_with_one_row();
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![memory_call("使用者偏好 rebase", "T1")]),
+            Ok(vec![StepAction::Speak("記下來了".into())]),
+        ]);
+        let tools = FakeTools::new("").with_dir(&tmp.0);
+        let result = run(&mut backend, &tools, always(45));
+        // the tool result really did reach the model on step 2 — otherwise this
+        // test would pass for the wrong reason
+        assert!(backend.results_on(2)[0].text.contains("已經記進長期記憶"));
+        commit_in(&tmp.0, "記住我偏好 rebase", &result);
+
+        let rolling = crate::memory::history_snapshot_in(&tmp.0);
+        assert_eq!(
+            rolling,
+            vec![("記住我偏好 rebase".to_string(), "記下來了".to_string())]
+        );
+        let replayed = format!("{}{}", rolling[0].0, rolling[0].1);
+        assert!(!replayed.contains("已經記進長期記憶"));
+        assert!(!replayed.contains(crate::memory::MODEL_LINE_PREFIX));
     }
 
     // A follow-up carrying an unanswered call is a wire error, so a deadline
