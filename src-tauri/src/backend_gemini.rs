@@ -481,6 +481,179 @@ mod tests {
         );
     }
 
+    // --- GeminiLiveToolLoopReceipt ---
+    // `cargo test` structurally cannot prove that a real gemini call returns a
+    // function call, nor that a two-step turn's answer is grounded in the pane
+    // text the first step fetched. These two stay #[ignore]; a human runs them
+    // and reads the transcript. That is the receipt.
+
+    /// A backend that prints what actually crossed the wire while delegating to
+    /// the real one — the transcript is the deliverable, so it is built here
+    /// rather than smuggled into production logging.
+    struct Receipt {
+        inner: GeminiBackend,
+        step: usize,
+        first_actions: Vec<StepAction>,
+    }
+
+    impl Receipt {
+        fn new(inner: GeminiBackend) -> Self {
+            Self { inner, step: 0, first_actions: Vec::new() }
+        }
+
+        fn steps(&self) -> usize {
+            self.inner.steps()
+        }
+
+        fn asked_to_read_a_pane_first(&self) -> bool {
+            self.first_actions
+                .iter()
+                .any(|action| matches!(action, StepAction::ReadPane { .. }))
+        }
+    }
+
+    impl Backend for Receipt {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+
+        fn tools(&self) -> Vec<ToolSpec> {
+            self.inner.tools()
+        }
+
+        async fn step(
+            &mut self,
+            turn: &TurnStart,
+            results: &[ToolResult],
+            budget: Duration,
+        ) -> Result<Vec<StepAction>, String> {
+            self.step += 1;
+            let n = self.step;
+            println!("\n── step {n} (budget {budget:?}, {} tool result(s) fed back)", results.len());
+            for fed in results {
+                println!("   ↳ result for {}:\n{}", fed.call.name, fed.text);
+            }
+            let actions = self.inner.step(turn, results, budget).await;
+            if n == 1 {
+                // printed exactly once, so mixed text+functionCall parts and
+                // parallel functionCall parts are observable in the transcript
+                println!(
+                    "── raw step-1 response body:\n{}",
+                    self.inner.first_body().unwrap_or("<no body: the request failed>")
+                );
+                self.first_actions = actions.clone().unwrap_or_default();
+            }
+            println!("── step {n} parsed actions: {actions:?}");
+            actions
+        }
+    }
+
+    /// The isolation order matters: the override relocates the WHOLE config root,
+    /// so a key file under the real one would become invisible. Resolve the real
+    /// dir FIRST, carry the key files (only those, at 0600) into a throwaway
+    /// root, and only then install the override.
+    fn live_key_in(tmp: &std::path::Path) -> String {
+        crate::backend::copy_provider_keys(&crate::config::config_dir(), tmp);
+        crate::backend::load_key(crate::backend::Provider::Gemini).expect(
+            "live receipt needs GEMINI_API_KEY in the env or a gemini_api_key file under ~/.config/shikigami/",
+        )
+    }
+
+    fn live_roster() -> Vec<crate::events::AgentEntry> {
+        // NOT get_roster(): that reads the cache the polling thread fills, and a
+        // test binary never runs it.
+        let roster = crate::herdr::fetch_roster_now()
+            .expect("live receipt needs herdr running (agent.list over its socket)");
+        assert!(
+            roster.iter().any(|entry| !entry.pane.is_empty()),
+            "live receipt needs at least one live herdr agent to look at"
+        );
+        println!(
+            "== roster: {:?}",
+            roster
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.status.as_str(), entry.pane.as_str()))
+                .collect::<Vec<_>>()
+        );
+        roster
+    }
+
+    fn run_live(
+        key: String,
+        roster: &[crate::events::AgentEntry],
+        transcript: &str,
+    ) -> (Receipt, Result<crate::brain::SummonAction, String>) {
+        // The prefetched depth is deliberately EMPTY: the model has to reach for
+        // read_pane instead of being handed the excerpt, which is the point.
+        let turn = TurnStart {
+            system: crate::brain::system_prompt(roster, &[], None, &crate::tools::specs()),
+            history: Vec::new(),
+            transcript: transcript.to_string(),
+        };
+        println!("== transcript: {transcript}");
+        let mut receipt = Receipt::new(GeminiBackend::new(key));
+        let tools = crate::tools::LiveTools { roster: roster.to_vec() };
+        let started = std::time::Instant::now();
+        let outcome = tauri::async_runtime::block_on(crate::brain::run_turn_with(
+            &mut receipt,
+            &turn,
+            &tools,
+            move || crate::brain::TURN_BUDGET.saturating_sub(started.elapsed()),
+            crate::brain::MAX_STEPS,
+        ));
+        println!("\n== final outcome: {outcome:?}");
+        (receipt, outcome)
+    }
+
+    #[test]
+    #[ignore]
+    fn gemini_live_looks_at_a_pane_then_answers_from_it() {
+        // run: GEMINI_API_KEY=… cargo test gemini_live_looks -- --ignored --nocapture
+        let tmp = Tmp::new();
+        let key = live_key_in(&tmp.0);
+        let _dir = crate::config::test_override::ConfigDirOverride::set(&tmp.0);
+        let roster = live_roster();
+        // the agent named is a real one, so a human can judge whether the second
+        // step's answer is grounded in the pane text the first step fetched
+        let target = roster
+            .iter()
+            .find(|entry| !entry.pane.is_empty())
+            .expect("checked by live_roster")
+            .name
+            .clone();
+
+        let (receipt, outcome) =
+            run_live(key, &roster, &format!("去看一下 {target} 的畫面，它現在在做什麼？"));
+
+        let Ok(crate::brain::SummonAction::Speak(answer)) = &outcome else {
+            panic!("a look-and-tell-me question must end in speech: {outcome:?}");
+        };
+        assert!(!answer.trim().is_empty(), "the second step must actually say something");
+        assert!(
+            receipt.asked_to_read_a_pane_first(),
+            "step 1 must ask to read a pane — if no functionCall ever arrives, flip THINKING_BUDGET off 0 and re-run"
+        );
+        assert_eq!(receipt.steps(), 2, "a look-then-answer turn costs exactly two requests");
+    }
+
+    #[test]
+    #[ignore]
+    fn gemini_live_fast_path_still_costs_one_request() {
+        // run: GEMINI_API_KEY=… cargo test gemini_live_fast_path -- --ignored --nocapture
+        let tmp = Tmp::new();
+        let key = live_key_in(&tmp.0);
+        let _dir = crate::config::test_override::ConfigDirOverride::set(&tmp.0);
+        let roster = live_roster();
+
+        let (receipt, outcome) = run_live(key, &roster, "現在誰在工作");
+
+        assert!(
+            matches!(outcome, Ok(crate::brain::SummonAction::Speak(_))),
+            "a roster question is answered from the prompt, not from a tool: {outcome:?}"
+        );
+        assert_eq!(receipt.steps(), 1, "the fast path must still cost a single request");
+    }
+
     // --- GeminiToolResultRoundTrip ---
     fn result(name: &str, id: Option<&str>, text: &str) -> ToolResult {
         ToolResult {
