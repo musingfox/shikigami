@@ -1273,6 +1273,33 @@ mod tests {
         assert!(!text.contains("觀測輸出"));
     }
 
+    // The on-demand layer must not write back into the rolling layer, or context
+    // grows monotonically and a resident brain cannot survive. `history_snapshot_in`
+    // *is* the rolling layer — what the next turn replays — so asserting on it is
+    // the claim itself, not a proxy for it.
+    #[test]
+    fn what_a_tool_fetched_never_reaches_the_next_turns_rolling_layer() {
+        let tmp = Tmp::new();
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![read_pane("builder")]),
+            Ok(vec![StepAction::Speak("builder 在跑測試".into())]),
+        ]);
+        let tools = FakeTools::new("cargo test\nerror[E0308]");
+        let result = run(&mut backend, &tools, always(45));
+        // the excerpt really did reach the model on step 2 — otherwise this test
+        // would pass for the wrong reason
+        assert!(backend.results_on(2)[0].text.contains("error[E0308]"));
+        commit_in(&tmp.0, "builder 在做什麼", &result);
+
+        let rolling = crate::memory::history_snapshot_in(&tmp.0);
+        assert_eq!(rolling.len(), 1);
+        assert_eq!(rolling[0].1, "builder 在跑測試");
+        let replayed = format!("{}{}", rolling[0].0, rolling[0].1);
+        assert!(!replayed.contains("error[E0308]"));
+        assert!(!replayed.contains("cargo test"));
+        assert!(!replayed.contains("觀測輸出"));
+    }
+
     #[test]
     fn a_summon_terminal_turn_leaves_one_sentence_not_the_action_json() {
         let tmp = Tmp::new();
