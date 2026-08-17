@@ -238,6 +238,59 @@ pub(crate) fn curated_cap_ok(existing: &str, line: &str) -> Result<(), String> {
     ))
 }
 
+/// Its own lock: `APPEND_LOCK` bounds `memory.jsonl`, a different file with a
+/// different rotation rule.
+static CURATED_LOCK: Mutex<()> = Mutex::new(());
+
+/// Guardrail 4: the model may only ever add to the end of `MEMORY.md`. There is
+/// no code path in this app that rewrites or truncates what is already in that
+/// file, so whatever the user hand-wrote survives every model write by
+/// construction rather than by a block parser being correct — the file before a
+/// write is always a byte prefix of the file after it.
+///
+/// The one subtlety is the separator: a hand-edited file often ends without a
+/// newline, and appending straight onto it would glue the marker into the middle
+/// of the user's last line. That line would then carry no marker of its own, so
+/// the model's words would be injected as the user's trusted ones — the exact
+/// direction the trust split must never fail in. Writing the missing newline
+/// first is still pure append.
+pub(crate) fn curated_append_in(dir: &Path, line: &str) -> Result<(), String> {
+    let _guard = CURATED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = dir.join("MEMORY.md");
+    let joiner = match fs::read_to_string(&path) {
+        Ok(text) if !text.is_empty() && !text.ends_with('\n') => "\n",
+        _ => "",
+    };
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    // Line and terminator in one write, same reason as `append_row_in`.
+    file.write_all(format!("{joiner}{line}\n").as_bytes())
+        .map_err(|e| e.to_string())
+}
+
+/// One model write of the curated layer, end to end: the four guardrails in
+/// order, against the file and the rows actually on disk. `Ok` carries the line
+/// that really landed; `Err` carries the reason to hand back to the model, which
+/// is a refusal far more often than it is a failure. Either way the caller can
+/// tell the two apart — nothing was written unless this returns `Ok`.
+pub(crate) fn curated_write_in(
+    dir: &Path,
+    text: &str,
+    source: &str,
+    now_ts: &str,
+) -> Result<String, String> {
+    let existing = fs::read_to_string(dir.join("MEMORY.md")).unwrap_or_default();
+    let known: Vec<String> = memory_rows_in(dir).into_iter().map(|row| row.ts).collect();
+    curated_source_ok(&known, text, source)?;
+    let line = curated_line(text, source, now_ts);
+    curated_cap_ok(&existing, &line)?;
+    curated_append_in(dir, &line)?;
+    Ok(line)
+}
+
 fn curated_warning(chars: usize) -> Option<String> {
     (chars > CURATED_MAX_CHARS).then(|| {
         format!(
@@ -597,6 +650,99 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(small.0.join("MEMORY.md")).unwrap(),
             format!("使用者的話\n{line}\n")
+        );
+    }
+
+    // CuratedAppendOnly — guardrail 4. Whatever the user wrote is still there,
+    // byte for byte, after the model has written.
+    #[test]
+    fn a_model_write_lands_after_the_users_words_never_over_them() {
+        let tmp = Tmp::new();
+        let theirs = "使用者的話\n";
+        std::fs::write(tmp.0.join("MEMORY.md"), theirs).unwrap();
+        let line = curated_line("使用者偏好 rebase", "T1", "T2");
+        curated_append_in(&tmp.0, &line).unwrap();
+
+        let after = std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap();
+        assert_eq!(after, format!("{theirs}{line}\n"));
+        assert!(after.as_bytes().starts_with(theirs.as_bytes()));
+    }
+
+    #[test]
+    fn the_first_write_creates_the_file() {
+        let tmp = Tmp::new();
+        let line = curated_line("使用者偏好 rebase", "T1", "T2");
+        curated_append_in(&tmp.0, &line).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap(),
+            format!("{line}\n")
+        );
+    }
+
+    #[test]
+    fn each_write_keeps_every_earlier_one_as_a_prefix() {
+        let tmp = Tmp::new();
+        curated_append_in(&tmp.0, "L1").unwrap();
+        let first = std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap();
+        curated_append_in(&tmp.0, "L2").unwrap();
+        let second = std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap();
+        assert_eq!(second, "L1\nL2\n");
+        assert!(second.as_bytes().starts_with(first.as_bytes()));
+    }
+
+    // A hand-edited file with no closing newline is ordinary. If the appended
+    // marker landed mid-line it would lose its mark and be injected as the user's
+    // own words — so the separator goes in first, still as an append.
+    #[test]
+    fn a_file_that_ends_without_a_newline_does_not_swallow_the_marker() {
+        let tmp = Tmp::new();
+        let theirs = "使用者的話（沒有換行結尾）";
+        std::fs::write(tmp.0.join("MEMORY.md"), theirs).unwrap();
+        let line = curated_line("使用者偏好 rebase", "T1", "T2");
+        curated_append_in(&tmp.0, &line).unwrap();
+
+        let after = std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap();
+        assert_eq!(after, format!("{theirs}\n{line}\n"));
+        assert!(after.as_bytes().starts_with(theirs.as_bytes()));
+        assert!(after
+            .lines()
+            .any(|row| row.starts_with(MODEL_LINE_PREFIX)));
+    }
+
+    #[test]
+    fn what_was_written_is_what_the_next_turn_reads() {
+        let tmp = Tmp::new();
+        std::fs::write(tmp.0.join("MEMORY.md"), "使用者的話\n").unwrap();
+        let line = curated_line("使用者偏好 rebase", "T1", "T2");
+        curated_append_in(&tmp.0, &line).unwrap();
+        let loaded = curated_in(&tmp.0).unwrap();
+        assert!(loaded.contains("使用者的話"));
+        assert!(loaded.contains(&line));
+
+        // an unwritable directory is a failure message, never a panic
+        assert!(curated_append_in(&tmp.0.join("missing"), "L").is_err());
+    }
+
+    // The whole chain against real files: the row it names has to be on disk.
+    #[test]
+    fn the_end_to_end_write_only_lands_when_every_guardrail_agrees() {
+        let tmp = Tmp::new();
+        std::fs::write(
+            tmp.0.join("memory.jsonl"),
+            "{\"ts\":\"T1\",\"verb\":\"inject\",\"pane\":\"%1\",\"text\":\"跑測試\"}\n",
+        )
+        .unwrap();
+        let line = curated_write_in(&tmp.0, "使用者偏好 rebase", "T1", "T2").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap(),
+            format!("{line}\n")
+        );
+
+        let before = std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap();
+        assert!(curated_write_in(&tmp.0, "編造的來源", "沒這一列", "T3").is_err());
+        assert_eq!(
+            std::fs::read_to_string(tmp.0.join("MEMORY.md")).unwrap(),
+            before
         );
     }
 
