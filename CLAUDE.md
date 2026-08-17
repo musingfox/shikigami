@@ -209,9 +209,10 @@ The fast path stops paying (increment 2, 2026-08-17):
   `AgentDepth::screen` is kept though nothing populates it: `render_roster` still
   renders it, and that is the slot an event-driven turn would fill
 - Known gap, **not** caused here: `dai_live`'s "no source → must say 不知道" assertion
-  is flaky against the live model (~1 in 5). The request on that path is
-  byte-equivalent to `404f40c`'s, so R-observe's central invariant is *unlikely*
-  rather than *closed* — worth its own ticket
+  is flaky against the live model (~1 in 5). That path declares no tools and its
+  request builder is key-for-key identical to `404f40c`'s, so nothing here caused
+  it: R-observe's central invariant is *unlikely* rather than *closed* — worth its
+  own ticket
 
 ## Architecture
 

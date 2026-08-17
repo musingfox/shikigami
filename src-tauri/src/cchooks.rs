@@ -126,7 +126,7 @@ pub fn depth_for(pane: &str) -> Option<HookDepth> {
 }
 
 #[cfg(test)]
-fn clear_depths() {
+pub(crate) fn clear_depths() {
     HOOK_DEPTHS
         .lock()
         .unwrap_or_else(|e| e.into_inner())

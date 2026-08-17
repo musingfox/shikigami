@@ -189,11 +189,22 @@ mod tests {
         // Until the screen prefetch was removed this test could pass on the screen
         // half alone — which is exactly why R-observe's hook half had no receipt.
         // Now the join can only be proven by a hook line, so this is that receipt.
+        // HOOK_DEPTHS is process-global and cchooks' own tests assert on it, so
+        // this must leave it as it was found — filling a shared global and walking
+        // away is how a victim test fails for a reason nobody can locate.
+        crate::cchooks::clear_depths();
         let spool = std::fs::read_to_string(crate::cchooks::spool_path())
             .expect("live test needs the real hooks.ndjson spool");
         for line in spool.lines() {
             crate::cchooks::record_depth(line);
         }
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::cchooks::clear_depths();
+            }
+        }
+        let _restore = Restore;
         let depth = crate::depth::collect(&roster);
         let observed = roster
             .iter()
