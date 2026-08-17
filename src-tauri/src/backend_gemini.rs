@@ -288,7 +288,7 @@ mod tests {
         let declared = v["tools"][0]["functionDeclarations"].as_array().unwrap();
         assert_eq!(
             declared.iter().map(|d| d["name"].as_str().unwrap()).collect::<Vec<_>>(),
-            ["read_pane", "summon"]
+            ["read_pane", "summon", "recall"]
         );
         let read_pane = &declared[0]["parameters"];
         assert_eq!(read_pane["type"], "OBJECT");
@@ -437,13 +437,13 @@ mod tests {
     #[test]
     fn a_call_for_a_tool_we_do_not_have_is_rejected_by_name() {
         let v = parts(json!([{
-            "functionCall": { "name": "recall", "args": { "query": "x" }, "id": "c2" }
+            "functionCall": { "name": "phantom_tool", "args": { "query": "x" }, "id": "c2" }
         }]));
         assert_eq!(
             gemini_step(&v).unwrap(),
             vec![StepAction::Rejected {
-                call: CallRef { id: Some("c2".into()), name: "recall".into() },
-                reason: "沒有這個工具：recall".into(),
+                call: CallRef { id: Some("c2".into()), name: "phantom_tool".into() },
+                reason: "沒有這個工具：phantom_tool".into(),
             }]
         );
     }
@@ -592,7 +592,12 @@ mod tests {
         };
         println!("== transcript: {transcript}");
         let mut receipt = Receipt::new(GeminiBackend::new(key));
-        let tools = crate::tools::LiveTools { roster: roster.to_vec() };
+        // The caller has already relocated the config root, so a live `recall`
+        // searches the throwaway memory rather than the real one.
+        let tools = crate::tools::LiveTools {
+            roster: roster.to_vec(),
+            dir: crate::config::config_dir(),
+        };
         let started = std::time::Instant::now();
         let outcome = tauri::async_runtime::block_on(crate::brain::run_turn_with(
             &mut receipt,

@@ -49,6 +49,7 @@ pub struct ToolResult {
 pub enum StepAction {
     Speak(String),
     ReadPane { call: CallRef, agent: String },
+    Recall { call: CallRef, query: String },
     Summon { project: String, task: String },
     Rejected { call: CallRef, reason: String },
 }
@@ -101,6 +102,16 @@ pub fn step_action(name: &str, args: &Value, id: Option<&str>) -> StepAction {
                 };
             }
             StepAction::ReadPane { call, agent }
+        }
+        "recall" => {
+            let query = field("query");
+            if query.is_empty() {
+                return StepAction::Rejected {
+                    call,
+                    reason: "recall 需要 query 這個參數，填要查的關鍵詞".to_string(),
+                };
+            }
+            StepAction::Recall { call, query }
         }
         "summon" => {
             let (project, task) = (field("project"), field("task"));
@@ -406,7 +417,9 @@ impl Backend for FakeBackend {
 pub(crate) struct FakeTools {
     roster: Vec<crate::events::AgentEntry>,
     screen: String,
+    rows: Vec<crate::memory::MemoryRow>,
     reads: std::sync::Mutex<Vec<String>>,
+    queries: std::sync::Mutex<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -423,12 +436,25 @@ impl FakeTools {
         Self {
             roster: vec![entry("builder", "%1"), entry("reviewer", "%2")],
             screen: screen.to_string(),
+            rows: Vec::new(),
             reads: std::sync::Mutex::new(Vec::new()),
+            queries: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// The memory rows this runner's `recall` searches. Same body the live runner
+    /// builds, from injected rows instead of a file.
+    pub(crate) fn with_rows(mut self, rows: Vec<crate::memory::MemoryRow>) -> Self {
+        self.rows = rows;
+        self
     }
 
     pub(crate) fn reads(&self) -> Vec<String> {
         self.reads.lock().unwrap().clone()
+    }
+
+    pub(crate) fn queries(&self) -> Vec<String> {
+        self.queries.lock().unwrap().clone()
     }
 }
 
@@ -440,6 +466,11 @@ impl crate::tools::Tools for FakeTools {
         std::future::ready(crate::tools::read_pane_body(&self.roster, agent, move |_| {
             Ok(screen)
         }))
+    }
+
+    fn recall(&self, query: &str) -> impl Future<Output = String> + Send {
+        self.queries.lock().unwrap().push(query.to_string());
+        std::future::ready(crate::tools::recall_body(&self.rows, query).0)
     }
 }
 
@@ -578,14 +609,25 @@ mod tests {
     // A tool call the app cannot run is a correctable mistake, not a failure.
     #[test]
     fn unknown_tool_is_rejected_by_name() {
-        let action = step_action("recall", &serde_json::json!({ "query": "x" }), Some("c2"));
+        let action = step_action("phantom_tool", &serde_json::json!({ "query": "x" }), Some("c2"));
         assert_eq!(
             action,
             StepAction::Rejected {
-                call: CallRef { id: Some("c2".into()), name: "recall".into() },
-                reason: "沒有這個工具：recall".into(),
+                call: CallRef { id: Some("c2".into()), name: "phantom_tool".into() },
+                reason: "沒有這個工具：phantom_tool".into(),
             }
         );
+    }
+
+    // A recall the model forgot to fill in is correctable in band, like every
+    // other missing argument — never an `Err` that ends the turn.
+    #[test]
+    fn recall_without_a_query_is_rejected_naming_the_argument() {
+        let StepAction::Rejected { reason, .. } = step_action("recall", &serde_json::json!({}), None)
+        else {
+            panic!("a recall without a query must not become a call");
+        };
+        assert!(reason.contains("query"));
     }
 
     #[test]
@@ -605,6 +647,13 @@ mod tests {
             StepAction::ReadPane {
                 call: CallRef { id: None, name: "read_pane".into() },
                 agent: "builder".into(),
+            }
+        );
+        assert_eq!(
+            step_action("recall", &serde_json::json!({ "query": " cyris " }), Some("c3")),
+            StepAction::Recall {
+                call: CallRef { id: Some("c3".into()), name: "recall".into() },
+                query: "cyris".into(),
             }
         );
         assert_eq!(

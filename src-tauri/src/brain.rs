@@ -42,6 +42,10 @@ pub(crate) const MIN_STEP_BUDGET: Duration = Duration::from_secs(5);
 const OUT_OF_STEPS: &str = "步數上限";
 const TIMED_OUT: &str = "時間上限";
 
+/// What an exhausted turn calls the memory files when it names its sources —
+/// the counterpart of the roster's own name for a pane.
+const MEMORY_SOURCE: &str = "長期記憶";
+
 // Appended to the system prompt so a "go open project X and do Y" request comes
 // back machine-readable instead of as a verbal promise. The JSON is written
 // colon-tight and fence-free because parse_action only accepts a bare object.
@@ -251,7 +255,9 @@ fn decide(actions: &[StepAction]) -> Decision {
         .filter(|action| {
             matches!(
                 action,
-                StepAction::ReadPane { .. } | StepAction::Rejected { .. }
+                StepAction::ReadPane { .. }
+                    | StepAction::Recall { .. }
+                    | StepAction::Rejected { .. }
             )
         })
         .cloned()
@@ -356,6 +362,18 @@ where
                             }
                             results.push(ToolResult { call, text: read.text });
                         }
+                        // Long-term memory is the app's own state, so a query that
+                        // ran did reach it — finding nothing is an answer from a
+                        // source, not a failure to reach one. Named once however
+                        // many times the model asks.
+                        StepAction::Recall { call, query } => {
+                            let text = tools.recall(&query).await;
+                            let label = MEMORY_SOURCE.to_string();
+                            if !consulted.contains(&label) {
+                                consulted.push(label);
+                            }
+                            results.push(ToolResult { call, text });
+                        }
                         // A tool we cannot run answers with its own reason, so the
                         // model can correct itself inside the step budget instead
                         // of the turn failing.
@@ -407,7 +425,8 @@ async fn ask_once(
     history: &[(String, String)],
 ) -> Result<SummonAction, String> {
     let mut backend = crate::backend::detect()?;
-    let curated = crate::memory::curated_in(&crate::config::config_dir());
+    let dir = crate::config::config_dir();
+    let curated = crate::memory::curated_in(&dir);
     let turn = TurnStart {
         // The prompt only ever advertises tools this backend can actually call.
         system: system_prompt(roster, depth, curated.as_deref(), &backend.tools()),
@@ -416,6 +435,7 @@ async fn ask_once(
     };
     let tools = crate::tools::LiveTools {
         roster: roster.to_vec(),
+        dir,
     };
     let started = std::time::Instant::now();
     run_turn_with(
@@ -939,6 +959,27 @@ mod tests {
         }
     }
 
+    fn recall(query: &str) -> StepAction {
+        StepAction::Recall {
+            call: CallRef { id: None, name: "recall".into() },
+            query: query.into(),
+        }
+    }
+
+    /// One past command, the shape `log_inject` writes.
+    fn memory_rows() -> Vec<crate::memory::MemoryRow> {
+        vec![crate::memory::MemoryRow {
+            ts: "T1".into(),
+            verb: "inject".into(),
+            text: "跑測試".into(),
+            pane: Some("%1".into()),
+            agent: Some("cyris".into()),
+            project: None,
+            user: None,
+            assistant: None,
+        }]
+    }
+
     fn run<C: Fn() -> Duration>(
         backend: &mut FakeBackend,
         tools: &FakeTools,
@@ -1024,6 +1065,46 @@ mod tests {
         assert_eq!(fed.len(), 1);
         assert_eq!(fed[0].text, "沒有這個工具：recall");
         assert!(tools.reads().is_empty());
+    }
+
+    // RecallInTurnLoop — the model looks something up mid-turn and answers from
+    // what came back, not from what it guessed.
+    #[test]
+    fn a_recall_answer_reaches_the_next_request() {
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![recall("cyris")]),
+            Ok(vec![StepAction::Speak("你上次叫 cyris 跑測試".into())]),
+        ]);
+        let tools = FakeTools::new("").with_rows(memory_rows());
+        assert_eq!(
+            run(&mut backend, &tools, always(45)),
+            Ok(SummonAction::Speak("你上次叫 cyris 跑測試".into()))
+        );
+        let fed = backend.results_on(2);
+        assert_eq!(fed.len(), 1);
+        assert_eq!(fed[0].call.name, "recall");
+        assert_eq!(
+            fed[0].text,
+            crate::tools::recall_body(&memory_rows(), "cyris").0
+        );
+        assert!(fed[0].text.contains("T1"));
+        assert!(fed[0].text.contains("跑測試"));
+        assert_eq!(tools.queries(), vec!["cyris"]);
+        assert!(tools.reads().is_empty());
+    }
+
+    // Looking and finding nothing is still having looked — same precedent as a
+    // pane that was reached but blank.
+    #[test]
+    fn a_recall_that_found_nothing_still_counts_as_a_consulted_source() {
+        let mut backend = FakeBackend::new(vec![Ok(vec![recall("cyris")])]);
+        let tools = FakeTools::new("");
+        let message = spoken(run(&mut backend, &tools, always(45)));
+        assert!(message.contains(OUT_OF_STEPS));
+        assert!(message.contains("我查了 長期記憶"));
+        // asked on every step it had, named once
+        assert_eq!(tools.queries().len(), MAX_STEPS - 1);
+        assert_eq!(message.matches("長期記憶").count(), 1);
     }
 
     // A follow-up carrying an unanswered call is a wire error, so a deadline
@@ -1297,6 +1378,35 @@ mod tests {
         let replayed = format!("{}{}", rolling[0].0, rolling[0].1);
         assert!(!replayed.contains("error[E0308]"));
         assert!(!replayed.contains("cargo test"));
+        assert!(!replayed.contains("觀測輸出"));
+    }
+
+    // Same rule for the second tool: what `recall` dug up is on-demand context,
+    // so it dies with the turn instead of being replayed forever afterwards.
+    #[test]
+    fn what_recall_found_never_reaches_the_next_turns_rolling_layer() {
+        let tmp = Tmp::new();
+        let mut backend = FakeBackend::new(vec![
+            Ok(vec![recall("cyris")]),
+            Ok(vec![StepAction::Speak("你上次叫 cyris 跑測試".into())]),
+        ]);
+        let tools = FakeTools::new("").with_rows(memory_rows());
+        let result = run(&mut backend, &tools, always(45));
+        // the rows really did reach the model on step 2 — otherwise this test
+        // would pass for the wrong reason
+        assert!(backend.results_on(2)[0].text.contains("T1"));
+        commit_in(&tmp.0, "我上次叫 cyris 做什麼", &result);
+
+        let rolling = crate::memory::history_snapshot_in(&tmp.0);
+        assert_eq!(
+            rolling,
+            vec![(
+                "我上次叫 cyris 做什麼".to_string(),
+                "你上次叫 cyris 跑測試".to_string()
+            )]
+        );
+        let replayed = format!("{}{}", rolling[0].0, rolling[0].1);
+        assert!(!replayed.contains("T1"));
         assert!(!replayed.contains("觀測輸出"));
     }
 

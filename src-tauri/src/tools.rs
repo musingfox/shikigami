@@ -50,12 +50,32 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
                 "required": ["project", "task"],
             }),
         },
+        ToolSpec {
+            name: "recall",
+            description:
+                "在長期記憶裡查過去的對話和過去交辦出去的指令。被問到「我之前說過什麼」「上次叫誰做什麼」這類過去的事，而最近幾輪對話裡沒有答案時，用這個工具去查，不要猜。查到的每一列開頭是那一列的時間戳。",
+            parameters: json!({
+                "type": "OBJECT",
+                "properties": {
+                    "query": {
+                        "type": "STRING",
+                        "description": "要查的關鍵詞：agent 名稱、專案名稱，或那件事本身的字眼",
+                    },
+                },
+                "required": ["query"],
+            }),
+        },
     ]
 }
 
 /// Running one tool call. Injectable so the loop's tests never touch a socket.
 pub(crate) trait Tools {
     fn read_pane(&self, agent: &str) -> impl Future<Output = PaneRead> + Send;
+
+    /// Search long-term memory. Unlike `read_pane` there is no "did it reach the
+    /// source" question to answer: the memory files are the app's own state, so
+    /// a query that ran at all consulted them — finding nothing included.
+    fn recall(&self, query: &str) -> impl Future<Output = String> + Send;
 }
 
 /// What one `read_pane` call produced. `text` always goes back to the model — a
@@ -220,9 +240,27 @@ fn resolve<'a>(roster: &'a [AgentEntry], agent: &str) -> Option<&'a AgentEntry> 
 /// roster is the snapshot taken once at the start of the turn.
 pub(crate) struct LiveTools {
     pub roster: Vec<AgentEntry>,
+    /// Where memory lives. Carried on the runner rather than read from
+    /// `config_dir()` inside the tool, so a test can point one turn's `recall` at
+    /// a throwaway directory without touching a process-global override.
+    pub dir: std::path::PathBuf,
 }
 
 impl Tools for LiveTools {
+    fn recall(&self, query: &str) -> impl Future<Output = String> + Send {
+        let dir = self.dir.clone();
+        let query = query.to_string();
+        async move {
+            // Reading (possibly) two whole memory files is blocking IO, so it goes
+            // on a blocking thread exactly like the pane read does.
+            tauri::async_runtime::spawn_blocking(move || {
+                recall_body(&crate::memory::memory_rows_in(&dir), &query).0
+            })
+            .await
+            .unwrap_or_else(|error| format!("查不到長期記憶：{error}"))
+        }
+    }
+
     fn read_pane(&self, agent: &str) -> impl Future<Output = PaneRead> + Send {
         let roster = self.roster.clone();
         let agent = agent.to_string();
@@ -491,10 +529,11 @@ mod tests {
         let specs = specs();
         assert_eq!(
             specs.iter().map(|spec| spec.name).collect::<Vec<_>>(),
-            ["read_pane", "summon"]
+            ["read_pane", "summon", "recall"]
         );
         assert!(specs.iter().all(|spec| !spec.description.is_empty()));
         assert_eq!(specs[0].parameters["required"], json!(["agent"]));
         assert_eq!(specs[1].parameters["required"], json!(["project", "task"]));
+        assert_eq!(specs[2].parameters["required"], json!(["query"]));
     }
 }
