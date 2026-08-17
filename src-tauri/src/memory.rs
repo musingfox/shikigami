@@ -204,6 +204,25 @@ pub(crate) fn curated_source_ok(known_ts: &[String], text: &str, source: &str) -
     Ok(())
 }
 
+/// What every model-written line of `MEMORY.md` starts with. It is both the
+/// audit mark a human reads and the only handle the prompt has on authorship, so
+/// it is checked per line rather than per block: under append-only the user's
+/// later edits land *after* the model's lines, and a block heading would read
+/// their words as the model's.
+pub(crate) const MODEL_LINE_PREFIX: &str = "- 式神 ";
+
+/// Guardrail 2: one model write, as one auditable line — who wrote it, when, and
+/// which record it was drawn from. Newlines are flattened to spaces because a
+/// second line would carry no mark and would then be injected as the user's own
+/// words.
+pub(crate) fn curated_line(text: &str, source: &str, now_ts: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!(
+        "{MODEL_LINE_PREFIX}{now_ts}（來源 {}）：{flat}",
+        source.trim()
+    )
+}
+
 fn curated_warning(chars: usize) -> Option<String> {
     (chars > CURATED_MAX_CHARS).then(|| {
         format!(
@@ -454,6 +473,40 @@ mod tests {
     #[test]
     fn blank_content_is_not_worth_writing_however_good_the_source_is() {
         assert!(curated_source_ok(&known(), "   ", "2026-08-16T09:12:03Z").is_err());
+    }
+
+    // CuratedWriteAuditLine — guardrail 2. Opening MEMORY.md tells you at a
+    // glance which lines are not your own.
+    #[test]
+    fn a_model_written_line_says_who_when_and_from_which_record() {
+        assert_eq!(
+            curated_line(
+                "使用者偏好 rebase",
+                "2026-08-16T09:12:03Z",
+                "2026-08-17T05:00:00Z"
+            ),
+            "- 式神 2026-08-17T05:00:00Z（來源 2026-08-16T09:12:03Z）：使用者偏好 rebase"
+        );
+    }
+
+    #[test]
+    fn a_model_written_line_carries_the_marker_the_prompt_splits_on() {
+        let line = curated_line(
+            "使用者偏好 rebase",
+            "2026-08-16T09:12:03Z",
+            "2026-08-17T05:00:00Z",
+        );
+        assert!(line.starts_with(MODEL_LINE_PREFIX));
+        assert_eq!(MODEL_LINE_PREFIX, "- 式神 ");
+    }
+
+    // A second line would carry no marker, so it would be injected as the user's
+    // own trusted words — the one way a model write could escape its mark.
+    #[test]
+    fn a_multi_line_write_stays_one_marked_line() {
+        let line = curated_line("第一行\n第二行", "T1", "T2");
+        assert_eq!(line.lines().count(), 1);
+        assert_eq!(line, "- 式神 T2（來源 T1）：第一行 第二行");
     }
 
     #[test]
