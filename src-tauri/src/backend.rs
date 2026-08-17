@@ -129,6 +129,48 @@ pub fn text_action(text: &str) -> StepAction {
     }
 }
 
+/// A single request never outlives the turn that started it: the client's
+/// timeout is the smaller of the remaining turn budget and this ceiling.
+const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Client shape (no_proxy + timeout) copied from SumVox — macOS CoreFoundation
+/// workaround.
+pub(crate) fn http_client(budget: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(budget.min(MAX_REQUEST_TIMEOUT))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// Send one already-shaped request and hand back the raw response body. Shared
+/// transport only — which keys go in the body is each adapter's own business.
+pub(crate) async fn send_json(
+    request: reqwest::RequestBuilder,
+    body: &Value,
+    provider: &str,
+) -> Result<String, String> {
+    let response = request
+        .header("content-type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("brain request failed: {}", e))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("brain read body: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("{} API {}: {}", provider, status, text));
+    }
+    Ok(text)
+}
+
+pub(crate) fn parse_body(raw: &str) -> Result<Value, String> {
+    serde_json::from_str(raw).map_err(|e| format!("brain parse: {} body={}", e, raw))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     Gemini,

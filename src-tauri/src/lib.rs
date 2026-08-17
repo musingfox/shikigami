@@ -6,6 +6,7 @@ mod sumvox;
 mod memory;
 mod tray;
 mod backend;
+mod backend_gemini;
 mod brain;
 mod voice;
 mod stt;
