@@ -176,6 +176,34 @@ pub(crate) fn curated_in(dir: &Path) -> Option<String> {
     Some(text)
 }
 
+/// Guardrail 1 of the curated writer: a write may only name a source that is
+/// really on disk. The ts set comes from `memory_rows_in`, so "does this record
+/// exist" is answered by the file, never by the model's own claim — the same
+/// shape as `PaneRead::consulted`, where the tool reports what it actually
+/// reached rather than what it says it reached. This brain has twice been caught
+/// naming a source it never had; a prompt rule would be a third chance to.
+///
+/// Refusing is not an error: the reason goes back to the model as that call's
+/// result, so it can correct itself inside the same turn.
+pub(crate) fn curated_source_ok(known_ts: &[String], text: &str, source: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("沒有內容可以記：text 是空的。".to_string());
+    }
+    let source = source.trim();
+    if source.is_empty() {
+        return Err(
+            "每一條長期記憶都要有來源：source 是空的。先用 recall 查出那一列開頭的時間戳，再把它逐字填進 source。"
+                .to_string(),
+        );
+    }
+    if !known_ts.iter().any(|ts| ts == source) {
+        return Err(format!(
+            "查不到來源 {source}：長期記憶裡沒有這個時間戳的紀錄，所以這一條沒有寫進去。先用 recall 查出那一列開頭的時間戳，再把它逐字填進 source。"
+        ));
+    }
+    Ok(())
+}
+
 fn curated_warning(chars: usize) -> Option<String> {
     (chars > CURATED_MAX_CHARS).then(|| {
         format!(
@@ -383,6 +411,49 @@ mod tests {
         assert_eq!(rows[0].pane.as_deref(), Some("%1"));
         assert_eq!(rows[0].project, None);
         assert_eq!(rows[0].user, None);
+    }
+
+    // CuratedWriteSourceCheck — guardrail 1. A source the disk cannot confirm is
+    // not a source, however confidently the model names it.
+    fn known() -> Vec<String> {
+        vec!["2026-08-16T09:12:03Z".to_string()]
+    }
+
+    #[test]
+    fn a_write_naming_a_row_that_really_exists_is_accepted() {
+        assert_eq!(
+            curated_source_ok(&known(), "使用者偏好 rebase", "2026-08-16T09:12:03Z"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_source_no_row_carries_is_refused_and_points_at_recall() {
+        let reason = curated_source_ok(&known(), "使用者偏好 rebase", "2020-01-01T00:00:00Z")
+            .unwrap_err();
+        assert!(reason.contains("2020-01-01T00:00:00Z"));
+        assert!(reason.contains("查不到"));
+        assert!(reason.contains("recall"));
+    }
+
+    #[test]
+    fn a_blank_source_is_refused_before_anything_is_looked_up() {
+        let reason = curated_source_ok(&known(), "使用者偏好 rebase", "   ").unwrap_err();
+        assert!(reason.contains("source"));
+        assert!(reason.contains("recall"));
+    }
+
+    // Nothing on disk means nothing citable, so the guardrail is structural: with
+    // an empty memory no write can get through at all.
+    #[test]
+    fn with_no_rows_at_all_no_write_can_get_through() {
+        assert!(curated_source_ok(&[], "使用者偏好 rebase", "2026-08-16T09:12:03Z").is_err());
+        assert!(curated_source_ok(&[], "使用者偏好 rebase", "隨便一個字串").is_err());
+    }
+
+    #[test]
+    fn blank_content_is_not_worth_writing_however_good_the_source_is() {
+        assert!(curated_source_ok(&known(), "   ", "2026-08-16T09:12:03Z").is_err());
     }
 
     #[test]
