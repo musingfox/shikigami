@@ -246,7 +246,18 @@ The fast path stops paying (increment 2, 2026-08-17):
   layer is machine-written and increment 3's `memory` guardrail refuses a sourceless
   write **because R-observe proved this brain invents sources**. That guardrail is
   only as good as this invariant, so until the ticket has numbers, treat it as
-  *probably* effective
+  *probably* effective.
+  **Measured 2026-08-18, and almost every sentence above it is wrong** (ticket now
+  `done`; residue in `brain-no-source-residue`). N=50 per arm, `dai_live`'s no-depth
+  fixture: this commit **2/50, none of them an invention**; `404f40c` **8/50, five of
+  them inventions**. So (a) "~1 in 5" was n=5 noise and the high end is the *old*
+  code, (b) **the invariant was never closed** — R-observe shipped at a 10% invention
+  rate that five samples missed, (c) "that path declares no tools" is false since
+  increment 1 (`ea54fcd:brain.rs:413`), so the exoneration's own premise didn't hold —
+  though the direction is the opposite of the fear: all 50 samples here cost one step
+  and called no tool, so the loop is not involved in this path at all. The one
+  assertion was judging two unrelated things — inventing a cause, versus stating a
+  true roster fact without the 不知道 opener — and is now split accordingly
 
 It remembers what you tell it to (R-tool-loop increment 3, 2026-08-17):
 
