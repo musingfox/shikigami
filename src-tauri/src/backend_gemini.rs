@@ -906,4 +906,156 @@ mod tests {
         assert_eq!(contents[4]["parts"][0]["functionResponse"]["response"]["result"], "第一輪");
         assert_eq!(contents[6]["parts"][0]["functionResponse"]["response"]["result"], "第二輪");
     }
+
+    // ---- measurement instrument (brain-no-source-invariant-flaky) ----
+    //
+    // R-observe's central invariant — with no source in hand the brain must
+    // answer 不知道 and name no cause — is known to break against the live model
+    // at roughly 1 in 5, on n=5. That is too few samples to tell 1/5 from 0/5, so
+    // the ticket forbids touching the prompt before there are real numbers. This
+    // is the instrument that produces them.
+    //
+    // It measures ONLY the no-depth arm of `dai_live`, with that test's fixture
+    // copied byte for byte — a different question or roster would measure a
+    // different invariant. It reuses `dai_live`'s own predicate deliberately:
+    // inventing a looser one here would measure something nobody ships.
+    //
+    // What it deliberately does NOT do: judge. It records the verbatim reply,
+    // whether the shipped predicate accepted it, how many requests the turn cost
+    // and which tools the model reached for, then leaves the reading to a human.
+    // "The model said something true but phrased without the magic words" and
+    // "the model invented a source" both fail the predicate and are not the same
+    // defect; only the transcripts can tell them apart.
+    //
+    // run: GEMINI_API_KEY=… MEASURE_N=30 MEASURE_OUT=/tmp/head.jsonl \
+    //        cargo test dai_no_source_rate -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dai_no_source_rate_measurement() {
+        let n: usize = std::env::var("MEASURE_N")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(30);
+        let out = std::env::var("MEASURE_OUT")
+            .unwrap_or_else(|_| "/tmp/dai-no-source.jsonl".to_string());
+
+        // Isolation order per the module's other live tests: resolve the real dir
+        // and carry the key BEFORE relocating the root. The throwaway root is
+        // left with no MEMORY.md and no memory.jsonl on purpose — the curated
+        // layer is injected into every prompt and a `recall` would search the
+        // real log, so both are confounders for a question about having no source.
+        let tmp = Tmp::new();
+        let key = live_key_in(&tmp.0);
+        let _dir = crate::config::test_override::ConfigDirOverride::set(&tmp.0);
+
+        // dai_live's fixture, verbatim (its `agent()` helper hardcodes this pane).
+        // `%1` is a tmux-shaped id and herdr addresses panes as `w7Q:p1`, so a
+        // `read_pane` call here can only ever come back unread: this arm cannot
+        // accidentally acquire a real source, whether or not herdr is running.
+        let roster = [crate::events::AgentEntry {
+            id: "id-builder".into(),
+            name: "builder".into(),
+            pane: "%1".into(),
+            status: "blocked".into(),
+            title: String::new(),
+            cwd: String::new(),
+        }];
+        let question = "builder 卡在什麼？";
+
+        let mut violations = 0usize;
+        let mut errors = 0usize;
+        let mut samples = 0usize;
+        let mut log = String::new();
+
+        for i in 0..n {
+            let turn = TurnStart {
+                system: crate::brain::system_prompt(&roster, &[], None, &crate::tools::specs()),
+                history: Vec::new(),
+                transcript: question.to_string(),
+            };
+            let mut backend = GeminiBackend::new(key.clone());
+            let tools = crate::tools::LiveTools {
+                roster: roster.to_vec(),
+                dir: crate::config::config_dir(),
+            };
+            let started = std::time::Instant::now();
+            let outcome = tauri::async_runtime::block_on(crate::brain::run_turn_with(
+                &mut backend,
+                &turn,
+                &tools,
+                move || crate::brain::TURN_BUDGET.saturating_sub(started.elapsed()),
+                crate::brain::MAX_STEPS,
+            ));
+            let steps = backend.steps();
+            let asked_for = tool_names_asked(&backend);
+
+            // A transport failure is not the model violating anything. It is
+            // counted apart and kept out of the denominator; folding the two
+            // together would corrupt the very rate this exists to measure.
+            let (ok, reply, error) = match outcome {
+                Ok(crate::brain::SummonAction::Speak(reply)) => {
+                    let ok = reply.contains("不知道")
+                        || reply.contains("未觀測")
+                        || reply.contains("無法判斷");
+                    (Some(ok), reply, None)
+                }
+                Ok(other) => (Some(false), format!("{other:?}"), None),
+                Err(error) => (None, String::new(), Some(error)),
+            };
+            match ok {
+                Some(true) => samples += 1,
+                Some(false) => {
+                    samples += 1;
+                    violations += 1;
+                }
+                None => errors += 1,
+            }
+            println!(
+                "[{i}] ok={ok:?} steps={steps} tools={asked_for:?}{}{}",
+                if reply.is_empty() { String::new() } else { format!(" reply={reply}") },
+                error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default(),
+            );
+            log.push_str(&format!(
+                "{}\n",
+                serde_json::json!({
+                    "i": i,
+                    "ok": ok,
+                    "reply": reply,
+                    "steps": steps,
+                    "tools_asked": asked_for,
+                    "error": error,
+                })
+            ));
+        }
+
+        std::fs::write(&out, &log).expect("samples must be durable — scrollback is not a receipt");
+        println!(
+            "== no-source violations {violations}/{samples} (transport errors {errors}, excluded); samples at {out}"
+        );
+    }
+
+    /// Which tools the model asked for across a turn, read back out of the
+    /// requests that actually left — the replies alone cannot tell you whether a
+    /// turn went multi-step, and that is the variable this measurement is for.
+    fn tool_names_asked(backend: &GeminiBackend) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut n = 0;
+        while let Some(request) = backend.request(n) {
+            if let Some(contents) = request["contents"].as_array() {
+                for entry in contents {
+                    if let Some(parts) = entry["parts"].as_array() {
+                        for part in parts {
+                            if let Some(name) = part["functionCall"]["name"].as_str() {
+                                names.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            n += 1;
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
 }
