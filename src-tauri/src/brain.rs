@@ -914,13 +914,92 @@ mod tests {
         println!("screen reply: {screen_reply}");
         assert!(screen_reply.contains("畫面"));
 
-        let unknown_reply = ask_with(&[]);
-        println!("no-depth reply: {unknown_reply}");
+        // The no-depth arm is split in two, because measuring it (N=50 per arm,
+        // 2026-08-18, see brain-no-source-invariant-flaky) showed one predicate
+        // was judging two unrelated things:
+        //
+        //   * stating a cause nothing gave it — the defect R-observe exists for.
+        //     0/50 here, 5/50 before the loop landed. Deterministic, one sample,
+        //     fails the test outright.
+        //   * omitting the 不知道 opener while saying something entirely true
+        //     ("builder 現在是 blocked" — the status IS on the roster). 2/50 here.
+        //     A phrasing wobble, not an invention, and it is what made this test
+        //     look flaky while reading like a deterministic gate.
+        //
+        // So the hedge is checked across samples and allowed to miss a minority:
+        // it guards a probabilistic property and now says so. At the measured 4%
+        // a 3-of-5 floor turns a 1-in-25 red into roughly 1 in 1000.
+        const SAMPLES: usize = 5;
+        const HEDGE_FLOOR: usize = 3;
+        let mut hedged = 0;
+        for i in 0..SAMPLES {
+            let reply = ask_with(&[]);
+            println!("no-depth reply [{i}]: {reply}");
+            assert!(
+                !claims_a_cause(&reply),
+                "with no source the brain must name no cause, and this one did: {reply}"
+            );
+            if says_it_does_not_know(&reply) {
+                hedged += 1;
+            }
+        }
         assert!(
-            unknown_reply.contains("不知道")
-                || unknown_reply.contains("未觀測")
-                || unknown_reply.contains("無法判斷")
+            hedged >= HEDGE_FLOOR,
+            "the 不知道 opener held {hedged}/{SAMPLES} times, below the {HEDGE_FLOOR} floor"
         );
+    }
+
+    /// Did the reply answer 「卡在什麼」 — i.e. assert a cause — when nothing was
+    /// given to answer from?
+    ///
+    /// ponytail: this is a fuzzy check for a fuzzy property, pinned to the shape
+    /// every observed invention actually took (`卡在X` / `正在X`, X not the
+    /// question word). It is NOT a general invention detector and must not be
+    /// reused as one: an invention phrased 「應該是權限問題」 walks straight past
+    /// it. What makes it worth having anyway is that the alternative — the old
+    /// hedge-only predicate — could not tell an invention from a phrasing wobble
+    /// at all. Its fixtures below are the real replies from that measurement, so
+    /// it is pinned to observed behaviour rather than to what I imagined.
+    fn claims_a_cause(reply: &str) -> bool {
+        ["卡在", "正在"].iter().any(|marker| {
+            reply
+                .split(marker)
+                .nth(1)
+                .is_some_and(|rest| !rest.trim_start().starts_with("什麼"))
+        })
+    }
+
+    fn says_it_does_not_know(reply: &str) -> bool {
+        reply.contains("不知道") || reply.contains("未觀測") || reply.contains("無法判斷")
+    }
+
+    // The classifier above decides whether a live run is a real defect or a
+    // phrasing wobble, so it gets offline fixtures of its own — every string
+    // here is a verbatim reply from the 2026-08-18 measurement (100 samples,
+    // both arms), not one I made up.
+    #[test]
+    fn dai_cause_classifier_matches_the_measured_replies() {
+        // inventions — all five came from the pre-loop arm
+        for invented in [
+            "它卡在等待 build 資源。",
+            "它卡在 waiting for user input。",
+            "Builder 正在嘗試 acquire the lock。",
+            "它卡在等待 build 結束。",
+        ] {
+            assert!(claims_a_cause(invented), "should read as an invented cause: {invented}");
+        }
+        // true statements, cause never claimed — the compliant reply and the two
+        // phrasing wobbles. None of these may count as an invention.
+        for honest in [
+            "不知道它卡在什麼，只知道它現在是 blocked。",
+            "builder 現在是 blocked。",
+            "builder 目前是 blocked 狀態。",
+        ] {
+            assert!(!claims_a_cause(honest), "should not read as an invented cause: {honest}");
+        }
+        // the two halves are independent: a wobble is honest but unhedged
+        assert!(!says_it_does_not_know("builder 現在是 blocked。"));
+        assert!(says_it_does_not_know("不知道它卡在什麼，只知道它現在是 blocked。"));
     }
 
     // SummonActionParse
